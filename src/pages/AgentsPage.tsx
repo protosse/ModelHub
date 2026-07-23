@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBindings, FullState, Model, Provider } from "../types";
 import { emptyBindings } from "../types";
 import * as api from "../api/tauri";
@@ -13,6 +13,7 @@ type Props = {
 export function AgentsPage({ state, draft, onDraftChange, onToast }: Props) {
   const [bindings, setBindings] = useState<AgentBindings>(draft ?? emptyBindings());
   const [loading, setLoading] = useState(!draft);
+  const bootstrapped = useRef(draft !== null);
 
   const loadFromDisk = useCallback(async () => {
     setLoading(true);
@@ -20,23 +21,30 @@ export function AgentsPage({ state, draft, onDraftChange, onToast }: Props) {
       const live = await api.readLiveBindings();
       setBindings(live);
       onDraftChange(live);
+      bootstrapped.current = true;
     } catch (e) {
       onToast(e instanceof Error ? e.message : String(e));
       const empty = emptyBindings();
       setBindings(empty);
       onDraftChange(empty);
+      bootstrapped.current = true;
     } finally {
       setLoading(false);
     }
   }, [onDraftChange, onToast]);
 
+  // Initial disk load only once when there is no session draft.
+  // Do not re-fetch when switching tabs or when callback identities change.
   useEffect(() => {
     if (draft) {
       setBindings(draft);
       setLoading(false);
+      bootstrapped.current = true;
       return;
     }
-    void loadFromDisk();
+    if (!bootstrapped.current) {
+      void loadFromDisk();
+    }
   }, [draft, loadFromDisk]);
 
   const patch = (next: AgentBindings) => {

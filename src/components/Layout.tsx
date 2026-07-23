@@ -59,7 +59,7 @@ export function Layout({ page, onNavigate, onApply, toast, children }: Props) {
             应用更改
           </button>
         </header>
-        <main className="min-h-0 flex-1 overflow-auto p-5">{children}</main>
+        <main className="min-h-0 flex-1 overflow-hidden p-5">{children}</main>
       </div>
 
       <Toast message={toast} />

@@ -21,8 +21,10 @@ export function BackupsPage({ onToast }: Props) {
     }
   };
 
+  // Load once on mount; keep-alive means tab switches will not re-fetch.
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot bootstrap
   }, []);
 
   return (

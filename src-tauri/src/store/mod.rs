@@ -38,7 +38,19 @@ impl StoreService {
 
     pub fn load_store(&self) -> Result<Store> {
         self.ensure_dirs()?;
-        read_json_or_default(&self.paths.store_file())
+        let path = self.paths.store_file();
+        let mut store: Store = read_json_or_default(&path)?;
+        let before = store.test_prompts.len();
+        let had_default = store.test_prompts.iter().any(|p| p.is_default);
+        ensure_default_test_prompt(&mut store);
+        // Persist seed for older store.json files that lack prompts.
+        if path.exists()
+            && (store.test_prompts.len() != before
+                || (!had_default && store.test_prompts.iter().any(|p| p.is_default)))
+        {
+            let _ = self.save_store(&store);
+        }
+        Ok(store)
     }
 
     pub fn save_store(&self, store: &Store) -> Result<()> {
@@ -189,7 +201,16 @@ impl StoreService {
         };
         let removed = store.providers.remove(idx);
         secrets.secrets.remove(&removed.secret_ref);
+        let removed_model_ids: Vec<String> = store
+            .models
+            .iter()
+            .filter(|m| m.provider_id == id)
+            .map(|m| m.id.clone())
+            .collect();
         store.models.retain(|m| m.provider_id != id);
+        for mid in removed_model_ids {
+            store.model_test_results.remove(&mid);
+        }
         clear_bindings_for_provider(&mut store.agent_bindings, id);
         self.save_secrets(&secrets)?;
         self.save_store(&store)?;
@@ -303,6 +324,7 @@ impl StoreService {
             anyhow::bail!("model not found");
         }
         clear_bindings_for_model(&mut store.agent_bindings, id);
+        store.model_test_results.remove(id);
         self.save_store(&store)?;
         Ok(())
     }
@@ -349,6 +371,145 @@ impl StoreService {
                 (p.clone(), models)
             })
             .collect()
+    }
+
+    pub fn list_test_prompts(&self) -> Result<Vec<TestPrompt>> {
+        let store = self.load_store()?;
+        Ok(store.test_prompts)
+    }
+
+    pub fn upsert_test_prompt(&self, input: TestPromptInput) -> Result<TestPrompt> {
+        let mut store = self.load_store()?;
+        let name = input.name.trim().to_string();
+        let content = input.content.trim().to_string();
+        if name.is_empty() {
+            anyhow::bail!("提示词名称不能为空");
+        }
+        if content.is_empty() {
+            anyhow::bail!("提示词内容不能为空");
+        }
+        let now = now_iso();
+
+        if let Some(id) = input.id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let idx = store
+                .test_prompts
+                .iter()
+                .position(|p| p.id == id)
+                .with_context(|| format!("prompt not found: {id}"))?;
+            if store.test_prompts.iter().any(|p| {
+                p.id != id && p.name.eq_ignore_ascii_case(&name)
+            }) {
+                anyhow::bail!("提示词名称已存在：{name}");
+            }
+            let entry = &mut store.test_prompts[idx];
+            entry.name = name;
+            entry.content = content;
+            entry.updated_at = now;
+            let out = entry.clone();
+            self.save_store(&store)?;
+            return Ok(out);
+        }
+
+        if store
+            .test_prompts
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            anyhow::bail!("提示词名称已存在：{name}");
+        }
+        let prompt = TestPrompt {
+            id: format!("prompt_{}", Uuid::new_v4()),
+            name,
+            content,
+            is_default: false,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        store.test_prompts.push(prompt.clone());
+        self.save_store(&store)?;
+        Ok(prompt)
+    }
+
+    pub fn delete_test_prompt(&self, id: &str) -> Result<()> {
+        let mut store = self.load_store()?;
+        let Some(idx) = store.test_prompts.iter().position(|p| p.id == id) else {
+            anyhow::bail!("prompt not found");
+        };
+        if store.test_prompts[idx].is_default {
+            anyhow::bail!("默认提示词不可删除，请先将其他提示词设为默认");
+        }
+        store.test_prompts.remove(idx);
+        self.save_store(&store)?;
+        Ok(())
+    }
+
+    /// Mark one saved prompt as the default (only one default at a time).
+    pub fn set_default_test_prompt(&self, id: &str) -> Result<TestPrompt> {
+        let mut store = self.load_store()?;
+        let Some(idx) = store.test_prompts.iter().position(|p| p.id == id) else {
+            anyhow::bail!("prompt not found");
+        };
+        let now = now_iso();
+        for (i, p) in store.test_prompts.iter_mut().enumerate() {
+            let want = i == idx;
+            if p.is_default != want {
+                p.is_default = want;
+                p.updated_at = now.clone();
+            }
+        }
+        // Keep default first for stable UX in selectors.
+        if idx != 0 {
+            let def = store.test_prompts.remove(idx);
+            store.test_prompts.insert(0, def);
+        }
+        let out = store.test_prompts[0].clone();
+        self.save_store(&store)?;
+        Ok(out)
+    }
+
+    pub fn record_model_test_result(
+        &self,
+        model_id: &str,
+        ok: bool,
+        latency_ms: Option<u64>,
+        tested_at: Option<String>,
+    ) -> Result<ModelTestResult> {
+        let mut store = self.load_store()?;
+        if !store.models.iter().any(|m| m.id == model_id) {
+            anyhow::bail!("model not found");
+        }
+        let entry = ModelTestResult {
+            ok,
+            tested_at: tested_at
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(now_iso),
+            latency_ms,
+        };
+        store
+            .model_test_results
+            .insert(model_id.to_string(), entry.clone());
+        self.save_store(&store)?;
+        Ok(entry)
+    }
+}
+
+fn ensure_default_test_prompt(store: &mut Store) {
+    if store.test_prompts.is_empty() {
+        store.test_prompts = seed_test_prompts();
+        return;
+    }
+    if !store.test_prompts.iter().any(|p| p.is_default) {
+        // Prefer matching seed by id/name; otherwise prepend seed default.
+        let seed = seed_test_prompts().into_iter().next().unwrap();
+        if let Some(p) = store
+            .test_prompts
+            .iter_mut()
+            .find(|p| p.id == seed.id || p.name.eq_ignore_ascii_case(&seed.name))
+        {
+            p.is_default = true;
+        } else {
+            store.test_prompts.insert(0, seed);
+        }
     }
 }
 

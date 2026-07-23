@@ -29,6 +29,12 @@ pub fn run() {
             commands::reveal_api_key,
             commands::fetch_provider_models,
             commands::delete_providers,
+            commands::list_test_prompts,
+            commands::upsert_test_prompt,
+            commands::delete_test_prompt,
+            commands::set_default_test_prompt,
+            commands::record_model_test_result,
+            commands::test_model_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

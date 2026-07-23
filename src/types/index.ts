@@ -61,11 +61,52 @@ export type AgentBindings = {
   };
 };
 
+export type TestPrompt = {
+  readonly id: string;
+  readonly name: string;
+  readonly content: string;
+  readonly isDefault: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+/** Last connectivity test for a model row (persisted in store.json). */
+export type ModelTestResult = {
+  readonly ok: boolean;
+  readonly testedAt: string;
+  readonly latencyMs?: number | null;
+};
+
+export type TestPromptInput = {
+  readonly id?: string | null;
+  readonly name: string;
+  readonly content: string;
+};
+
+export type TestConnectionResult = {
+  readonly ok: boolean;
+  readonly latencyMs: number;
+  readonly httpStatus: number | null;
+  readonly protocol: Protocol;
+  readonly requestUrl: string;
+  readonly responseText: string | null;
+  readonly error: string | null;
+  readonly logs: readonly string[];
+  readonly requestMethod: string;
+  readonly requestHeaders: readonly string[];
+  readonly requestBody: string | null;
+  readonly responseHeaders: readonly string[];
+  readonly responseBody: string | null;
+};
+
 export type Store = {
   readonly version: number;
   readonly providers: readonly Provider[];
   readonly models: readonly Model[];
   readonly agentBindings: AgentBindings;
+  readonly testPrompts: readonly TestPrompt[];
+  /** modelId -> last test result */
+  readonly modelTestResults: Readonly<Record<string, ModelTestResult>>;
 };
 
 export type AppConfig = {

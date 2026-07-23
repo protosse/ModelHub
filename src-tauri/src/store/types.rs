@@ -113,6 +113,91 @@ pub struct Model {
     pub updated_at: String,
 }
 
+/// Saved prompt snippets for model connection tests (store.json).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestPrompt {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestPromptInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConnectionRequest {
+    /// Library model row id (`Model.id`).
+    pub model_id: String,
+    pub prompt: String,
+    /// Client-generated id to correlate streaming log events.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Request timeout in seconds (clamped server-side). Default 30.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConnectionResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub http_status: Option<u16>,
+    pub protocol: Protocol,
+    pub request_url: String,
+    /// Assistant text when parse succeeds; otherwise may mirror raw body snippet.
+    pub response_text: Option<String>,
+    pub error: Option<String>,
+    /// Human-readable timeline for diagnosing failures (no raw secrets).
+    #[serde(default)]
+    pub logs: Vec<String>,
+    #[serde(default)]
+    pub request_method: String,
+    /// Authorization / x-api-key values are redacted.
+    #[serde(default)]
+    pub request_headers: Vec<String>,
+    #[serde(default)]
+    pub request_body: Option<String>,
+    #[serde(default)]
+    pub response_headers: Vec<String>,
+    /// Raw response body (truncated) for failure analysis.
+    #[serde(default)]
+    pub response_body: Option<String>,
+}
+
+/// Last connectivity test outcome for a library model row (persisted in store.json).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTestResult {
+    pub ok: bool,
+    /// ISO-8601 timestamp when the test finished.
+    pub tested_at: String,
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+}
+
+pub fn seed_test_prompts() -> Vec<TestPrompt> {
+    vec![TestPrompt {
+        id: "prompt_default_connectivity".into(),
+        name: "连通性探测".into(),
+        content: "请只回复一个单词：ok".into(),
+        is_default: true,
+        created_at: "1970-01-01T00:00:00Z".into(),
+        updated_at: "1970-01-01T00:00:00Z".into(),
+    }]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeBinding {
@@ -197,6 +282,12 @@ pub struct Store {
     pub providers: Vec<Provider>,
     pub models: Vec<Model>,
     pub agent_bindings: AgentBindings,
+    /// Connection-test prompts (reusable).
+    #[serde(default = "seed_test_prompts")]
+    pub test_prompts: Vec<TestPrompt>,
+    /// Last connectivity test per model row id (`Model.id`).
+    #[serde(default)]
+    pub model_test_results: std::collections::HashMap<String, ModelTestResult>,
 }
 
 impl Default for Store {
@@ -206,6 +297,8 @@ impl Default for Store {
             providers: Vec::new(),
             models: Vec::new(),
             agent_bindings: AgentBindings::default(),
+            test_prompts: seed_test_prompts(),
+            model_test_results: std::collections::HashMap::new(),
         }
     }
 }

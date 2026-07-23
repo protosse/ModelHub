@@ -3,7 +3,8 @@ use crate::backup::{self, BackupEntry};
 use crate::paths::ModelHubPaths;
 use crate::store::{
     AgentBindings, AppConfig, ApplyRequest, ApplyResult, FullState, ImportPreview, ImportRequest,
-    ImportResult, Model, ModelInput, Provider, ProviderInput, RemoteModel, StoreService,
+    ImportResult, Model, ModelInput, ModelTestResult, Provider, ProviderInput, RemoteModel,
+    StoreService, TestConnectionRequest, TestConnectionResult, TestPrompt, TestPromptInput,
 };
 
 fn svc() -> Result<(StoreService, ModelHubPaths), String> {
@@ -159,4 +160,66 @@ pub fn delete_providers(ids: Vec<String>) -> Result<usize, String> {
         n += 1;
     }
     Ok(n)
+}
+
+#[tauri::command]
+pub fn list_test_prompts() -> Result<Vec<TestPrompt>, String> {
+    let (svc, _) = svc()?;
+    svc.list_test_prompts().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn upsert_test_prompt(input: TestPromptInput) -> Result<TestPrompt, String> {
+    let (svc, _) = svc()?;
+    svc.upsert_test_prompt(input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_test_prompt(id: String) -> Result<(), String> {
+    let (svc, _) = svc()?;
+    svc.delete_test_prompt(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_default_test_prompt(id: String) -> Result<TestPrompt, String> {
+    let (svc, _) = svc()?;
+    svc.set_default_test_prompt(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn record_model_test_result(
+    model_id: String,
+    ok: bool,
+    latency_ms: Option<u64>,
+    tested_at: Option<String>,
+) -> Result<ModelTestResult, String> {
+    let (svc, _) = svc()?;
+    svc.record_model_test_result(&model_id, ok, latency_ms, tested_at)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn test_model_connection(
+    app: tauri::AppHandle,
+    request: TestConnectionRequest,
+) -> Result<TestConnectionResult, String> {
+    let (svc, _) = svc()?;
+    let store = svc.load_store().map_err(|e| e.to_string())?;
+    let secrets = svc.load_secrets().map_err(|e| e.to_string())?;
+    let run_id = request
+        .run_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    adapters::test_model_connection(
+        Some(app),
+        &run_id,
+        &store,
+        &secrets,
+        &request.model_id,
+        &request.prompt,
+        request.timeout_secs,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }

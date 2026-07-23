@@ -9,9 +9,21 @@ import { SettingsPage } from "./pages/SettingsPage";
 import * as api from "./api/tauri";
 import type { AgentBindings, FullState, PageId } from "./types";
 import { emptyBindings } from "./types";
+import { hydrateLastTestResults } from "./lib/lastTestResults";
+
+/** Stable empty draft so ApplyPage doesn't treat every parent render as a change. */
+const EMPTY_DRAFT = emptyBindings();
+
+function pagePaneClass(active: boolean): string {
+  // Keep mounted + preserve each page's own scroll position.
+  return active ? "h-full overflow-auto" : "hidden";
+}
 
 export default function App() {
   const [page, setPage] = useState<PageId>("providers");
+  const [visited, setVisited] = useState<ReadonlySet<PageId>>(
+    () => new Set<PageId>(["providers"]),
+  );
   const [state, setState] = useState<FullState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -24,8 +36,19 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     const s = await api.getState();
+    hydrateLastTestResults(s.store.modelTestResults ?? {});
     setState(s);
     setError(null);
+  }, []);
+
+  const navigate = useCallback((next: PageId) => {
+    setPage(next);
+    setVisited((prev) => {
+      if (prev.has(next)) return prev;
+      const copy = new Set(prev);
+      copy.add(next);
+      return copy;
+    });
   }, []);
 
   useEffect(() => {
@@ -59,33 +82,50 @@ export default function App() {
   return (
     <Layout
       page={page}
-      onNavigate={setPage}
-      onApply={() => setPage("apply")}
+      onNavigate={navigate}
+      onApply={() => navigate("apply")}
       toast={toast}
     >
-      {page === "providers" ? (
-        <ProvidersPage state={state} onRefresh={refresh} onToast={showToast} />
+      {/* Mount once on first visit, then keep alive across tab switches. */}
+      {visited.has("providers") ? (
+        <div className={pagePaneClass(page === "providers")}>
+          <ProvidersPage state={state} onRefresh={refresh} onToast={showToast} />
+        </div>
       ) : null}
-      {page === "agents" ? (
-        <AgentsPage
-          state={state}
-          draft={draftBindings}
-          onDraftChange={setDraftBindings}
-          onToast={showToast}
-        />
+      {visited.has("agents") ? (
+        <div className={pagePaneClass(page === "agents")}>
+          <AgentsPage
+            state={state}
+            draft={draftBindings}
+            onDraftChange={setDraftBindings}
+            onToast={showToast}
+          />
+        </div>
       ) : null}
-      {page === "apply" ? (
-        <ApplyPage
-          state={state}
-          draft={draftBindings ?? emptyBindings()}
-          onToast={showToast}
-        />
+      {visited.has("apply") ? (
+        <div className={pagePaneClass(page === "apply")}>
+          <ApplyPage
+            state={state}
+            draft={draftBindings ?? EMPTY_DRAFT}
+            onToast={showToast}
+          />
+        </div>
       ) : null}
-      {page === "import" ? (
-        <ImportPage state={state} onRefresh={refresh} onToast={showToast} />
+      {visited.has("import") ? (
+        <div className={pagePaneClass(page === "import")}>
+          <ImportPage state={state} onRefresh={refresh} onToast={showToast} />
+        </div>
       ) : null}
-      {page === "backups" ? <BackupsPage onToast={showToast} /> : null}
-      {page === "settings" ? <SettingsPage state={state} /> : null}
+      {visited.has("backups") ? (
+        <div className={pagePaneClass(page === "backups")}>
+          <BackupsPage onToast={showToast} />
+        </div>
+      ) : null}
+      {visited.has("settings") ? (
+        <div className={pagePaneClass(page === "settings")}>
+          <SettingsPage state={state} />
+        </div>
+      ) : null}
     </Layout>
   );
 }

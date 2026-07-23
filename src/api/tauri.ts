@@ -13,6 +13,10 @@ import type {
   Provider,
   ProviderInput,
   RemoteModel,
+  ModelTestResult,
+  TestConnectionResult,
+  TestPrompt,
+  TestPromptInput,
 } from "../types";
 
 export async function getState(): Promise<FullState> {
@@ -133,4 +137,57 @@ export async function fetchProviderModels(providerId: string): Promise<readonly 
 
 export async function deleteProviders(ids: readonly string[]): Promise<number> {
   return invoke("delete_providers", { ids: [...ids] });
+}
+
+export async function listTestPrompts(): Promise<readonly TestPrompt[]> {
+  return invoke("list_test_prompts");
+}
+
+export async function upsertTestPrompt(input: TestPromptInput): Promise<TestPrompt> {
+  return invoke("upsert_test_prompt", { input });
+}
+
+export async function deleteTestPrompt(id: string): Promise<void> {
+  return invoke("delete_test_prompt", { id });
+}
+
+export async function setDefaultTestPrompt(id: string): Promise<TestPrompt> {
+  return invoke("set_default_test_prompt", { id });
+}
+
+export async function recordModelTestResult(
+  modelId: string,
+  ok: boolean,
+  latencyMs?: number | null,
+  testedAt?: string | null,
+): Promise<ModelTestResult> {
+  return invoke("record_model_test_result", {
+    modelId,
+    ok,
+    latencyMs: latencyMs ?? null,
+    testedAt: testedAt ?? null,
+  });
+}
+
+export const TEST_CONNECTION_LOG_EVENT = "test-connection-log";
+
+export type TestConnectionLogEvent = {
+  readonly runId: string;
+  readonly line: string;
+};
+
+export async function testModelConnection(
+  modelId: string,
+  prompt: string,
+  runId?: string,
+  timeoutSecs?: number,
+): Promise<TestConnectionResult> {
+  return invoke("test_model_connection", {
+    request: {
+      modelId,
+      prompt,
+      runId: runId ?? null,
+      timeoutSecs: timeoutSecs ?? null,
+    },
+  });
 }

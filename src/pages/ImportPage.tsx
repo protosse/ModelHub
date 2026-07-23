@@ -67,8 +67,10 @@ export function ImportPage({ state, onRefresh, onToast }: Props) {
     }
   };
 
+  // Load once on mount; keep-alive means tab switches will not re-scan.
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional one-shot bootstrap
   }, []);
 
   const itemById = useMemo(() => {

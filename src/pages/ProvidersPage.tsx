@@ -1,8 +1,17 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FullState, Model, Protocol, Provider, ProviderInput, RemoteModel } from "../types";
 import { PROTOCOLS } from "../types";
 import * as api from "../api/tauri";
 import { ConfirmDialog, Modal } from "../components/Modal";
+import { TestConnectionModal } from "../components/TestConnectionModal";
+import { ExternalLink } from "../components/ExternalLink";
+import { BatchTestConnectionModal } from "../components/BatchTestConnectionModal";
+import { MultiProviderTestModal } from "../components/MultiProviderTestModal";
+import { getBatchTestSession, subscribeBatchTestSession } from "../lib/batchTestSession";
+import { getMultiTestSession, isMultiTestBusy, subscribeMultiTestSession } from "../lib/multiTestSession";
+import { getSingleTestSession, subscribeSingleTestSession } from "../lib/singleTestSession";
+import { formatTestedAt, getLastTestResult, subscribeLastTestResults } from "../lib/lastTestResults";
+import { getModelTestDisplay } from "../lib/testDisplay";
 
 type Props = {
   readonly state: FullState;
@@ -25,6 +34,11 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
   const [fetchingId, setFetchingId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const [multiTesting, setMultiTesting] = useState(false);
+  const [multiSessionTick, setMultiSessionTick] = useState(0);
+  useEffect(() => {
+    return subscribeMultiTestSession(() => setMultiSessionTick((n) => n + 1));
+  }, []);
 
   const providers = useMemo(() => {
     const list = [...state.store.providers];
@@ -137,6 +151,24 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
           >
             删除所选
           </button>
+          <button
+            type="button"
+            className="btn-secondary !py-1 text-xs"
+            disabled={checkedIds.size === 0}
+            title="对勾选的提供商下模型做连通性测试（全局并发 3，同提供商串行）"
+            onClick={() => setMultiTesting(true)}
+          >
+            {(() => {
+              void multiSessionTick;
+              if (isMultiTestBusy()) {
+                const s = getMultiTestSession();
+                if (s && [...checkedIds].some((id) => s.providerIds.includes(id))) {
+                  return "测试中…";
+                }
+              }
+              return "测试所选";
+            })()}
+          </button>
         </div>
 
         <div className="card min-h-0 flex-1 overflow-auto">
@@ -179,7 +211,13 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
                           {p.enabled ? "同步中" : "未同步"}
                         </span>
                       </div>
-                      <div className="mt-1 truncate font-mono text-xs text-ink-3">{p.baseUrl}</div>
+                      <ExternalLink
+                        href={p.baseUrl}
+                        className="mt-1 inline-block max-w-full cursor-pointer truncate align-bottom font-mono text-xs text-accent hover:underline"
+                        title={`在浏览器打开 ${p.baseUrl}`}
+                      >
+                        {p.baseUrl}
+                      </ExternalLink>
                       <div className="mt-1 flex items-center gap-2 text-xs text-ink-3">
                         <span className="badge bg-surface-3 text-ink-2">{p.protocol}</span>
                         <span>{count} 模型</span>
@@ -200,6 +238,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
             key={selected.id}
             provider={selected}
             models={models}
+            testPrompts={state.store.testPrompts ?? []}
             mask={state.secretMasks[selected.secretRef] ?? "••••"}
             remoteModels={remoteByProvider[selected.id] ?? []}
             fetching={fetchingId === selected.id}
@@ -220,6 +259,16 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
           </div>
         )}
       </section>
+
+      {multiTesting ? (
+        <MultiProviderTestModal
+          providers={state.store.providers.filter((p) => checkedIds.has(p.id))}
+          models={state.store.models}
+          prompts={state.store.testPrompts ?? []}
+          onClose={() => setMultiTesting(false)}
+          onToast={onToast}
+        />
+      ) : null}
 
       {showCreate ? (
         <ProviderFormModal
@@ -258,6 +307,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
 function ProviderDetail({
   provider,
   models,
+  testPrompts,
   mask,
   remoteModels,
   fetching,
@@ -270,6 +320,7 @@ function ProviderDetail({
 }: {
   readonly provider: Provider;
   readonly models: readonly Model[];
+  readonly testPrompts: FullState["store"]["testPrompts"];
   readonly mask: string;
   readonly remoteModels: readonly RemoteModel[];
   readonly fetching: boolean;
@@ -280,13 +331,36 @@ function ProviderDetail({
   readonly onRequestDelete: () => void;
   readonly onRequestDeleteModel: (id: string, name: string) => void;
 }) {
-  const [tab, setTab] = useState<"connect" | "models">("connect");
+  const [tab, setTab] = useState<"connect" | "models">("models");
   const [editing, setEditing] = useState(false);
   const [addingModel, setAddingModel] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [plainKey, setPlainKey] = useState<string | null>(null);
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
+  const [testingModelId, setTestingModelId] = useState<string | null>(null);
+  const [batchTesting, setBatchTesting] = useState(false);
+  const [batchSessionTick, setBatchSessionTick] = useState(0);
+
+  useEffect(() => {
+    return subscribeBatchTestSession(() => setBatchSessionTick((n) => n + 1));
+  }, []);
+  const [singleSessionTick, setSingleSessionTick] = useState(0);
+  useEffect(() => {
+    return subscribeSingleTestSession(() => setSingleSessionTick((n) => n + 1));
+  }, []);
+  const [lastTestTick, setLastTestTick] = useState(0);
+  useEffect(() => {
+    return subscribeLastTestResults(() => setLastTestTick((n) => n + 1));
+  }, []);
+  const [multiSessionTick, setMultiSessionTick] = useState(0);
+  useEffect(() => {
+    return subscribeMultiTestSession(() => setMultiSessionTick((n) => n + 1));
+  }, []);
+
+  const testingModel = testingModelId
+    ? models.find((m) => m.id === testingModelId) ?? null
+    : null;
 
   const toggleKey = async () => {
     if (showKey) {
@@ -307,7 +381,14 @@ function ProviderDetail({
       <div className="flex items-start justify-between gap-3 border-b border-surface-3 px-4 py-3">
         <div>
           <h2 className="text-base font-semibold">{provider.name}</h2>
-          <p className="mt-1 font-mono text-xs text-ink-3">{provider.baseUrl}</p>
+          <ExternalLink
+            href={provider.baseUrl}
+            className="mt-1 inline-block max-w-full cursor-pointer truncate align-bottom font-mono text-xs text-accent hover:underline"
+            title={`在浏览器打开 ${provider.baseUrl}`}
+            onError={onToast}
+          >
+            {provider.baseUrl}
+          </ExternalLink>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-secondary" onClick={() => setEditing(true)}>
@@ -340,8 +421,8 @@ function ProviderDetail({
       <div className="flex gap-1 border-b border-surface-3 px-3 pt-2">
         {(
           [
-            ["connect", "连接"],
             ["models", "模型"],
+            ["connect", "连接"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -406,6 +487,20 @@ function ProviderDetail({
               >
                 {fetching ? "获取中…" : "获取模型"}
               </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={models.length === 0}
+                title="串行测试全部模型（并发 1）；关闭弹窗后测试仍继续"
+                onClick={() => setBatchTesting(true)}
+              >
+                {(() => {
+                  void batchSessionTick;
+                  const s = getBatchTestSession();
+                  if (s?.providerId === provider.id && s.busy) return "测试中…";
+                  return "测试全部";
+                })()}
+              </button>
               <button type="button" className="btn-primary" onClick={() => setAddingModel(true)}>
                 添加模型
               </button>
@@ -413,12 +508,20 @@ function ProviderDetail({
             {models.length === 0 ? (
               <div className="text-sm text-ink-3">暂无模型。可「获取模型」后添加，或手动填写。</div>
             ) : (
-              <table className="w-full text-left text-sm">
+              <table className="w-full table-fixed text-left text-sm">
+                <colgroup>
+                  <col className="w-[28%]" />
+                  <col className="w-[20%]" />
+                  <col className="w-[12%]" />
+                  <col className="w-[12%]" />
+                  <col className="w-[28%]" />
+                </colgroup>
                 <thead className="text-xs text-ink-3">
                   <tr>
-                    <th className="pb-2 font-medium">Model ID</th>
-                    <th className="pb-2 font-medium">展示名</th>
+                    <th className="pb-2 pr-2 font-medium">Model ID</th>
+                    <th className="pb-2 pr-2 font-medium">展示名</th>
                     <th className="pb-2 font-medium">启用</th>
+                    <th className="pb-2 font-medium">最近测试</th>
                     <th className="pb-2 font-medium" />
                   </tr>
                 </thead>
@@ -439,8 +542,12 @@ function ProviderDetail({
                       />
                     ) : (
                       <tr key={m.id} className="border-t border-surface-3">
-                        <td className="py-2 font-mono text-xs">{m.modelId}</td>
-                        <td className="py-2">{m.displayName}</td>
+                        <td className="truncate py-2 pr-2 font-mono text-xs" title={m.modelId}>
+                          {m.modelId}
+                        </td>
+                        <td className="truncate py-2 pr-2" title={m.displayName}>
+                          {m.displayName}
+                        </td>
                         <td className="py-2">
                           <button
                             type="button"
@@ -459,7 +566,6 @@ function ProviderDetail({
                                   capabilities: m.capabilities,
                                 });
                                 await onRefresh();
-                                onToast(m.enabled ? "已禁用模型" : "已启用模型");
                               } catch (e) {
                                 onToast(`更新失败：${e instanceof Error ? e.message : String(e)}`);
                               }
@@ -468,8 +574,90 @@ function ProviderDetail({
                             {m.enabled ? "已启用" : "已禁用"}
                           </button>
                         </td>
+                        <td className="py-2">
+                          {(() => {
+                            void lastTestTick;
+                            void singleSessionTick;
+                            void batchSessionTick;
+                            void multiSessionTick;
+                            // Prefer live session row (pending/running/ok/fail) over stale last success.
+                            const d = getModelTestDisplay(m.id);
+                            if (d.status === "running") {
+                              return (
+                                <span className="badge bg-accent/20 text-accent">测试中</span>
+                              );
+                            }
+                            if (d.status === "pending" && (d.source === "multi" || d.source === "batch")) {
+                              return (
+                                <span className="badge bg-surface-3 text-ink-3">待测</span>
+                              );
+                            }
+                            if (d.status === "ok") {
+                              const last = getLastTestResult(m.id);
+                              const tip = last
+                                ? `测试时间：${formatTestedAt(last.testedAt)}${
+                                    last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
+                                  }`
+                                : d.latencyMs != null
+                                  ? `${d.latencyMs} ms`
+                                  : undefined;
+                              return (
+                                <span className="badge bg-ok/15 text-ok" title={tip}>
+                                  成功
+                                </span>
+                              );
+                            }
+                            if (d.status === "fail") {
+                              const last = getLastTestResult(m.id);
+                              const tip = last
+                                ? `测试时间：${formatTestedAt(last.testedAt)}${
+                                    last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
+                                  }`
+                                : undefined;
+                              return (
+                                <span className="badge bg-danger/20 text-danger" title={tip}>
+                                  失败
+                                </span>
+                              );
+                            }
+                            if (d.status === "skipped" && (d.source === "multi" || d.source === "batch")) {
+                              return (
+                                <span className="badge bg-surface-3 text-ink-3">跳过</span>
+                              );
+                            }
+                            // Fallback: disk last result when no active session status
+                            const last = getLastTestResult(m.id);
+                            if (!last) {
+                              return <span className="text-xs text-ink-3">—</span>;
+                            }
+                            const tip = `测试时间：${formatTestedAt(last.testedAt)}${
+                              last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
+                            }`;
+                            return last.ok ? (
+                              <span className="badge bg-ok/15 text-ok" title={tip}>
+                                成功
+                              </span>
+                            ) : (
+                              <span className="badge bg-danger/20 text-danger" title={tip}>
+                                失败
+                              </span>
+                            );
+                          })()}
+                        </td>
                         <td className="py-2 text-right">
                           <div className="flex justify-end gap-1">
+                            <button
+                              type="button"
+                              className="btn-secondary !px-2 !py-1 text-xs"
+                              onClick={() => setTestingModelId(m.id)}
+                            >
+                              {(() => {
+                                void singleSessionTick;
+                                const s = getSingleTestSession();
+                                if (s?.modelId === m.id && s.busy) return "测试中…";
+                                return "测试";
+                              })()}
+                            </button>
                             <button
                               type="button"
                               className="btn-secondary !px-2 !py-1 text-xs"
@@ -545,6 +733,27 @@ function ProviderDetail({
           }}
         />
       ) : null}
+
+      {batchTesting ? (
+        <BatchTestConnectionModal
+          provider={provider}
+          models={models}
+          prompts={testPrompts}
+          onClose={() => setBatchTesting(false)}
+          onToast={onToast}
+        />
+      ) : null}
+
+      {testingModel ? (
+        <TestConnectionModal
+          provider={provider}
+          model={testingModel}
+          prompts={testPrompts}
+          onClose={() => setTestingModelId(null)}
+          onPromptsChanged={onRefresh}
+          onToast={onToast}
+        />
+      ) : null}
     </div>
   );
 }
@@ -566,47 +775,91 @@ function ModelEditRow({
   const [displayName, setDisplayName] = useState(model.displayName);
   const [enabled, setEnabled] = useState(model.enabled);
   const [busy, setBusy] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
   const hasRemote = remoteModels.length > 0;
 
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!pickerRef.current) return;
+      if (!pickerRef.current.contains(e.target as Node)) setPickerOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pickerOpen]);
+
+  const pickRemote = (id: string) => {
+    setModelId(id);
+    const meta = remoteModels.find((x) => x.id === id);
+    if (meta) setDisplayName(meta.name || id);
+    setPickerOpen(false);
+  };
+
+  // Compact controls that stay within fixed table columns (no column reflow).
+  const compactInput =
+    "box-border w-full min-w-0 rounded-md border border-surface-3 bg-surface-0 px-2 py-1 text-xs text-ink-1 outline-none focus:border-accent";
+
   return (
-    <tr className="border-t border-surface-3 bg-surface-0/50">
-      <td className="py-2 pr-2">
-        {hasRemote ? (
-          <select
-            className="input font-mono text-xs"
-            value={modelId}
-            onChange={(e) => {
-              const id = e.target.value;
-              setModelId(id);
-              const meta = remoteModels.find((x) => x.id === id);
-              if (meta) setDisplayName(meta.name || id);
-            }}
-          >
-            {!remoteModels.some((x) => x.id === modelId) ? (
-              <option value={modelId}>{modelId}</option>
-            ) : null}
-            {remoteModels.map((x) => (
-              <option key={x.id} value={x.id}>
-                {x.id}
-              </option>
-            ))}
-          </select>
-        ) : (
+    <tr className="border-t border-surface-3 bg-surface-0/40">
+      <td className="py-2 pr-2 align-middle">
+        <div className="relative w-full min-w-0" ref={pickerRef}>
           <input
-            className="input font-mono text-xs"
+            className={`${compactInput} font-mono ${hasRemote ? "pr-7" : ""}`}
             value={modelId}
             onChange={(e) => setModelId(e.target.value)}
+            placeholder="Model ID"
+            title="可手动输入 Model ID"
           />
-        )}
+          {hasRemote ? (
+            <button
+              type="button"
+              className="absolute right-0.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-ink-3 hover:bg-surface-3 hover:text-ink-1"
+              title="从已获取列表选择"
+              aria-label="从已获取列表选择"
+              aria-expanded={pickerOpen}
+              onClick={() => setPickerOpen((v) => !v)}
+            >
+              ▾
+            </button>
+          ) : null}
+          {hasRemote && pickerOpen ? (
+            <ul className="absolute left-0 top-full z-20 mt-1 max-h-44 min-w-full overflow-auto rounded-md border border-surface-3 bg-surface-1 py-1 shadow-lg">
+              {remoteModels.map((x) => (
+                <li key={x.id}>
+                  <button
+                    type="button"
+                    className={`flex w-full flex-col items-start px-2 py-1 text-left hover:bg-surface-2 ${
+                      x.id === modelId ? "bg-accent/10 text-accent" : "text-ink-1"
+                    }`}
+                    onClick={() => pickRemote(x.id)}
+                  >
+                    <span className="font-mono text-xs leading-tight">{x.id}</span>
+                    {x.name && x.name !== x.id ? (
+                      <span className="text-[10px] leading-tight text-ink-3">{x.name}</span>
+                    ) : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
       </td>
-      <td className="py-2 pr-2">
+      <td className="py-2 pr-2 align-middle">
         <input
-          className="input text-sm"
+          className={compactInput}
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
         />
       </td>
-      <td className="py-2">
+      <td className="py-2 align-middle">
         <button
           type="button"
           className={
@@ -619,7 +872,10 @@ function ModelEditRow({
           {enabled ? "已启用" : "已禁用"}
         </button>
       </td>
-      <td className="py-2 text-right">
+      <td className="py-2 align-middle">
+        <span className="text-xs text-ink-3">—</span>
+      </td>
+      <td className="py-2 text-right align-middle">
         <div className="flex justify-end gap-1">
           <button type="button" className="btn-secondary !px-2 !py-1 text-xs" disabled={busy} onClick={onCancel}>
             取消

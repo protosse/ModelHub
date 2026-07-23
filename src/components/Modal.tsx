@@ -4,9 +4,11 @@ type Props = {
   readonly onClose: () => void;
   readonly children: React.ReactNode;
   readonly wide?: boolean;
+  /** Wider than `wide` — for logs / long content. */
+  readonly xwide?: boolean;
 };
 
-export function Modal({ onClose, children, wide }: Props) {
+export function Modal({ onClose, children, wide, xwide }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -14,6 +16,8 @@ export function Modal({ onClose, children, wide }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  const width = xwide ? "max-w-2xl" : wide ? "max-w-lg" : "max-w-md";
 
   return (
     <div
@@ -23,7 +27,7 @@ export function Modal({ onClose, children, wide }: Props) {
       }}
     >
       <div
-        className={`card max-h-[85vh] w-full overflow-auto p-5 ${wide ? "max-w-lg" : "max-w-md"}`}
+        className={`card max-h-[85vh] w-full overflow-auto p-5 ${width}`}
         role="dialog"
         aria-modal="true"
       >

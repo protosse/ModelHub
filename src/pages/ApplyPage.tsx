@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBindings, ApplyAgentResult, FullState } from "../types";
 import * as api from "../api/tauri";
 import type { ApplyPreview } from "../api/tauri";
@@ -17,11 +17,13 @@ type Props = {
 };
 
 export function ApplyPage({ state, draft, onToast }: Props) {
-  const [selected, setSelected] = useState<string[]>(AGENTS.map((a) => a.id));
+  const [selected, setSelected] = useState<string[]>(() => AGENTS.map((a) => a.id));
   const [busy, setBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [results, setResults] = useState<readonly ApplyAgentResult[] | null>(null);
   const [preview, setPreview] = useState<ApplyPreview | null>(null);
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
 
   const toggle = (id: string) => {
     setSelected((prev) =>
@@ -29,25 +31,26 @@ export function ApplyPage({ state, draft, onToast }: Props) {
     );
   };
 
-  const loadPreview = async (agents: readonly string[]) => {
+  const loadPreview = useCallback(async (agents: readonly string[], bindings: AgentBindings) => {
     if (agents.length === 0) {
       setPreview({ agents: [] });
       return;
     }
     setPreviewBusy(true);
     try {
-      const p = await api.previewApply(agents, draft);
+      const p = await api.previewApply(agents, bindings);
       setPreview(p);
     } catch (e) {
-      onToast(e instanceof Error ? e.message : String(e));
+      onToastRef.current(e instanceof Error ? e.message : String(e));
     } finally {
       setPreviewBusy(false);
     }
-  };
+  }, []);
 
+  // Re-preview only when selection/draft/store data change — not on mere tab focus.
   useEffect(() => {
-    void loadPreview(selected);
-  }, [selected, draft, state.store.providers, state.store.models]);
+    void loadPreview(selected, draft);
+  }, [selected, draft, state.store.providers, state.store.models, loadPreview]);
 
   const run = async () => {
     setBusy(true);
@@ -57,7 +60,7 @@ export function ApplyPage({ state, draft, onToast }: Props) {
       setResults(res.results);
       const failed = res.results.filter((r) => !r.ok).length;
       onToast(failed ? `应用完成，${failed} 个失败` : "应用成功");
-      await loadPreview(selected);
+      await loadPreview(selected, draft);
     } catch (e) {
       onToast(e instanceof Error ? e.message : String(e));
     } finally {
@@ -152,7 +155,7 @@ export function ApplyPage({ state, draft, onToast }: Props) {
             type="button"
             className="btn-secondary"
             disabled={previewBusy || selected.length === 0}
-            onClick={() => void loadPreview(selected)}
+            onClick={() => void loadPreview(selected, draft)}
           >
             {previewBusy ? "对比中…" : "刷新对比"}
           </button>
