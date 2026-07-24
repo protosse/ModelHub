@@ -6,9 +6,11 @@ import {
   ensureSingleTestSession,
   getSingleTestSession,
   patchSingleTestSession,
+  requestStopSingleTest,
   runSingleTest,
   subscribeSingleTestSession,
 } from "../lib/singleTestSession";
+import { defaultTestHeadersText, parseHeadersText } from "../lib/testHeaders";
 import { Modal } from "./Modal";
 
 type Props = {
@@ -20,7 +22,7 @@ type Props = {
   readonly onToast: (msg: string) => void;
 };
 
-const FALLBACK_PROMPT = "请只回复一个单词：ok";
+const FALLBACK_PROMPT = "将123@qq.com转为Base64，直接回复结果";
 
 export function TestConnectionModal({
   provider,
@@ -64,9 +66,31 @@ export function TestConnectionModal({
   const logTab = forThisModel?.logTab ?? "timeline";
 
   const [saveBusy, setSaveBusy] = useState(false);
+  const [headersText, setHeadersText] = useState(() => defaultTestHeadersText(provider.protocol));
+  const [showHeaders, setShowHeaders] = useState(false);
   const preferPromptId = useRef<string | null>(null);
   const logBoxRef = useRef<HTMLPreElement | null>(null);
   const stickToBottom = useRef(true);
+  const headersSeeded = useRef(false);
+
+  // Seed session headers once for a fresh session (or when empty).
+  useEffect(() => {
+    const s = getSingleTestSession();
+    if (!s || s.modelId !== model.id || s.busy) return;
+    if (headersSeeded.current) return;
+    if (Object.keys(s.extraHeaders).length === 0) {
+      const defaults = parseHeadersText(defaultTestHeadersText(provider.protocol));
+      patchSingleTestSession({ extraHeaders: defaults });
+      setHeadersText(defaultTestHeadersText(provider.protocol));
+    } else {
+      setHeadersText(
+        Object.entries(s.extraHeaders)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\n"),
+      );
+    }
+    headersSeeded.current = true;
+  }, [model.id, provider.protocol]);
 
   // Init default prompt once for fresh session
   useEffect(() => {
@@ -123,6 +147,7 @@ export function TestConnectionModal({
       return;
     }
     stickToBottom.current = true;
+    patchSingleTestSession({ extraHeaders: parseHeadersText(headersText) });
     try {
       await runSingleTest(text, timeoutSecs);
     } catch (e) {
@@ -319,6 +344,52 @@ export function TestConnectionModal({
         </button>
       </div>
 
+      <div className="mb-3">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-xs text-ink-3">
+            额外请求头
+            <span className="ml-1 text-ink-3/80">（覆盖同名 Provider headers）</span>
+          </label>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              className="btn-ghost !px-2 !py-0.5 text-xs"
+              disabled={busy}
+              onClick={() => setShowHeaders((v) => !v)}
+            >
+              {showHeaders ? "收起" : "展开"}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost !px-2 !py-0.5 text-xs"
+              disabled={busy}
+              title="按当前协议填入默认客户端头"
+              onClick={() => setHeadersText(defaultTestHeadersText(provider.protocol))}
+            >
+              填默认
+            </button>
+          </div>
+        </div>
+        {showHeaders ? (
+          <textarea
+            className="input min-h-[72px] w-full resize-y font-mono text-xs"
+            value={headersText}
+            disabled={busy}
+            onChange={(e) => setHeadersText(e.target.value)}
+            placeholder={"User-Agent: claude-cli/2.1.79\nx-app: cli"}
+            spellCheck={false}
+          />
+        ) : (
+          <p className="truncate rounded-md border border-surface-3 bg-surface-1 px-2 py-1.5 font-mono text-[11px] text-ink-3">
+            {headersText
+              .split(/\r?\n/)
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith("#"))
+              .join(" · ") || "（无额外请求头）"}
+          </p>
+        )}
+      </div>
+
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div className="w-28">
           <label className="mb-1 block text-xs text-ink-3">超时（秒）</label>
@@ -338,14 +409,24 @@ export function TestConnectionModal({
           <button type="button" className="btn-secondary" onClick={onClose}>
             关闭
           </button>
-          <button
-            type="button"
-            className="btn-primary min-w-[7rem]"
-            disabled={busy}
-            onClick={() => void runTest()}
-          >
-            {busy ? "测试中…" : "发送测试"}
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              className="btn-secondary min-w-[7rem]"
+              title="立即结束本轮 UI 等待；已发出的请求仍可能跑完，结果会被丢弃"
+              onClick={() => requestStopSingleTest()}
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary min-w-[7rem]"
+              onClick={() => void runTest()}
+            >
+              发送测试
+            </button>
+          )}
         </div>
       </div>
 

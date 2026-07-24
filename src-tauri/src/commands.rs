@@ -65,6 +65,12 @@ pub fn add_model(input: ModelInput) -> Result<Model, String> {
 }
 
 #[tauri::command]
+pub fn add_models(inputs: Vec<ModelInput>) -> Result<Vec<Model>, String> {
+    let (svc, _) = svc()?;
+    svc.add_models(inputs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn update_model(id: String, input: ModelInput) -> Result<Model, String> {
     let (svc, _) = svc()?;
     svc.update_model(&id, input).map_err(|e| e.to_string())
@@ -219,6 +225,7 @@ pub async fn test_model_connection(
         &request.model_id,
         &request.prompt,
         request.timeout_secs,
+        request.extra_headers.as_ref(),
     )
     .await
     .map_err(|e| e.to_string())

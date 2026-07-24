@@ -151,6 +151,26 @@ export function setLastTestLogs(modelId: string, logs: readonly string[]): void 
   notify();
 }
 
+export function clearLastTestLogs(modelId: string): void {
+  const prev = results.get(modelId);
+  if (!prev) return;
+  if (!prev.logs.length && !prev.result) return;
+  results.set(modelId, {
+    ok: prev.ok,
+    testedAt: prev.testedAt,
+    latencyMs: prev.latencyMs,
+    logs: [],
+    result: null,
+  });
+  notify();
+}
+
+export function removeLastTestResult(modelId: string): void {
+  if (!results.has(modelId)) return;
+  results.delete(modelId);
+  notify();
+}
+
 export function subscribeLastTestResults(listener: () => void): () => void {
   listeners.add(listener);
   return () => {

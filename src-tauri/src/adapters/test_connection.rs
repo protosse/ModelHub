@@ -73,6 +73,7 @@ pub async fn test_model_connection(
     model_row_id: &str,
     prompt: &str,
     timeout_secs: Option<u64>,
+    extra_headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<TestConnectionResult> {
     let mut log = LogSink::new(app, run_id.to_string());
     let prompt = prompt.trim();
@@ -112,9 +113,37 @@ pub async fn test_model_connection(
     let base = normalize_base_url(&provider.base_url);
     let (url, body) = build_request(&base, &provider.protocol, &model.model_id, prompt)?;
     let request_body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-    let request_headers = build_request_header_log(&provider.protocol, api_key, &provider.headers);
 
-    log.push(format!("timeout={}s max_tokens={}", timeout_secs, MAX_TOKENS));
+    // Merge order: provider.headers, then per-run extra_headers (same key overwrites).
+    let mut merged_headers = provider.headers.clone();
+    if let Some(extra) = extra_headers {
+        for (k, v) in extra {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            merged_headers.insert(key.to_string(), v.clone());
+        }
+    }
+    let request_headers =
+        build_request_header_log(&provider.protocol, api_key, &merged_headers);
+
+    log.push(format!(
+        "timeout={}s token_limit={}",
+        timeout_secs,
+        match provider.protocol {
+            // Completions/Anthropic send max_tokens; Responses omits max_output_tokens
+            // for broader third-party gateway compatibility.
+            Protocol::OpenaiResponses => "none (responses)".to_string(),
+            _ => MAX_TOKENS.to_string(),
+        }
+    ));
+    if !merged_headers.is_empty() {
+        log.push(format!(
+            "extra/provider headers: {}",
+            merged_headers.len()
+        ));
+    }
     log.push(format!("POST {url}"));
     for h in &request_headers {
         log.push(format!("req header: {h}"));
@@ -131,7 +160,7 @@ pub async fn test_model_connection(
 
     let mut req = client.post(&url).json(&body);
     req = apply_auth(req, &provider.protocol, api_key);
-    for (k, v) in &provider.headers {
+    for (k, v) in &merged_headers {
         req = req.header(k, v);
     }
 
@@ -267,10 +296,12 @@ fn build_request(
             "max_tokens": MAX_TOKENS,
             "temperature": 0,
         }),
+        // Omit max_output_tokens: official OpenAI accepts it, but many third-party
+        // OpenAI-compatible /responses gateways reject it (HTTP 400 Unsupported parameter).
+        // Connectivity tests only need a minimal valid body.
         Protocol::OpenaiResponses => json!({
             "model": upstream_model_id,
             "input": prompt,
-            "max_output_tokens": MAX_TOKENS,
         }),
         Protocol::AnthropicMessages => json!({
             "model": upstream_model_id,

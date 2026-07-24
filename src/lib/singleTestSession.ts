@@ -1,7 +1,11 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { TestConnectionResult } from "../types";
 import * as api from "../api/tauri";
-import { getLastTestResult, setLastTestResult } from "./lastTestResults";
+import {
+  clearLastTestLogs,
+  getLastTestResult,
+  setLastTestResult,
+} from "./lastTestResults";
 
 export type SingleTestSession = {
   readonly modelId: string;
@@ -13,7 +17,11 @@ export type SingleTestSession = {
   timeoutSecs: number;
   selectedPromptId: string;
   saveName: string;
+  /** Extra HTTP headers for this run (merged after provider.headers). */
+  extraHeaders: Record<string, string>;
   busy: boolean;
+  /** When true, in-flight invoke result will be discarded when it returns. */
+  cancelled: boolean;
   runId: string | null;
   liveLines: string[];
   result: TestConnectionResult | null;
@@ -82,20 +90,18 @@ export type EnsureSingleArgs = {
   defaultPromptId: string;
 };
 
-/** Resume existing session for this model, or create a fresh shell. */
 export function ensureSingleTestSession(args: EnsureSingleArgs): SingleTestSession {
   if (session && session.modelId === args.modelId) {
-    // Refresh from shared cache if we have no live run and cache is richer
     if (!session.busy) {
       const last = getLastTestResult(args.modelId);
-      if (last?.logs?.length && session.liveLines.length === 0) {
+      if (last?.logs?.length && session.liveLines.length === 0 && session.result == null) {
         session.liveLines = [...last.logs];
         if (last.result) session.result = last.result;
+        // Keep showLog as-is (default collapsed); user expands manually.
       }
     }
     return session;
   }
-  // Switching to another model: leave previous request running if busy.
   const last = getLastTestResult(args.modelId);
   session = {
     modelId: args.modelId,
@@ -107,22 +113,45 @@ export function ensureSingleTestSession(args: EnsureSingleArgs): SingleTestSessi
     timeoutSecs: 30,
     selectedPromptId: args.defaultPromptId,
     saveName: "",
+    extraHeaders: {},
     busy: false,
+    cancelled: false,
     runId: null,
     liveLines: last?.logs?.length ? [...last.logs] : [],
     result: last?.result ?? null,
-    showLog: Boolean(last?.logs?.length),
+    // Logs panel stays collapsed until the user expands it.
+    showLog: false,
     logTab: "timeline",
   };
-  // Do not notify here — may run during React render.
   return session;
+}
+
+/** Soft-stop: free UI immediately; discard in-flight result when the request finishes. */
+export function requestStopSingleTest(): void {
+  if (!session || !session.busy) return;
+  const s = session;
+  s.cancelled = true;
+  s.liveLines = [
+    ...s.liveLines,
+    "[ui] stop requested — discarding in-flight result when it returns",
+  ];
+  // Invalidate run so the late invoke response is ignored.
+  s.runId = null;
+  s.busy = false;
+  notify();
 }
 
 export function patchSingleTestSession(
   patch: Partial<
     Pick<
       SingleTestSession,
-      "prompt" | "timeoutSecs" | "selectedPromptId" | "saveName" | "showLog" | "logTab"
+      | "prompt"
+      | "timeoutSecs"
+      | "selectedPromptId"
+      | "saveName"
+      | "extraHeaders"
+      | "showLog"
+      | "logTab"
     >
   >,
 ): void {
@@ -140,8 +169,13 @@ export function patchSingleTestSession(
 
 export function clearSingleTestLogs(): void {
   if (!session || session.busy) return;
+  const modelId = session.modelId;
   session.liveLines = [];
   session.result = null;
+  session.showLog = false;
+  session.logTab = "timeline";
+  // Also clear shared cache so re-open / re-render does not rehydrate batch logs.
+  clearLastTestLogs(modelId);
   notify();
 }
 
@@ -155,18 +189,26 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
 
   const runId = newRunId();
   s.busy = true;
+  s.cancelled = false;
   s.prompt = text;
   s.timeoutSecs = timeout;
   s.runId = runId;
   s.result = null;
   s.liveLines = [`[ui] preparing run ${runId}`, "[ui] invoking test_model_connection…"];
-  s.showLog = true;
+  // Do not auto-expand the log panel; respect current showLog / default collapsed.
   s.logTab = "timeline";
   notify();
 
   try {
-    const res = await api.testModelConnection(s.modelId, text, runId, timeout);
-    if (session !== s || s.runId !== runId) return;
+    const res = await api.testModelConnection(
+      s.modelId,
+      text,
+      runId,
+      timeout,
+      s.extraHeaders,
+    );
+    // Stopped or a newer run replaced this session.
+    if (session !== s || s.runId !== runId || s.cancelled) return;
     s.result = res;
     if (res.logs?.length) {
       s.liveLines = [...res.logs];
@@ -179,7 +221,7 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
     });
     if (!res.ok) s.logTab = "response";
   } catch (e) {
-    if (session !== s || s.runId !== runId) return;
+    if (session !== s || s.runId !== runId || s.cancelled) return;
     const msg = e instanceof Error ? e.message : String(e);
     s.liveLines = [...s.liveLines, `[ui] invoke error: ${msg}`];
     s.result = {
@@ -203,8 +245,10 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
     });
     s.logTab = "timeline";
   } finally {
+    // Only clear busy for this run if it was not already soft-stopped.
     if (session === s && s.runId === runId) {
       s.busy = false;
+      s.cancelled = false;
       notify();
     }
   }

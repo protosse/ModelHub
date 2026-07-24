@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Model, Provider, TestPrompt } from "../types";
+import * as api from "../api/tauri";
 import {
   createBatchTestSession,
   getBatchTestSession,
@@ -11,8 +12,9 @@ import {
   type BatchTestSession,
 } from "../lib/batchTestSession";
 import { getModelTestDisplay } from "../lib/testDisplay";
-import { subscribeLastTestResults } from "../lib/lastTestResults";
+import { getLastTestResult, subscribeLastTestResults } from "../lib/lastTestResults";
 import { getMultiTestSession, requestStopMultiTest, subscribeMultiTestSession } from "../lib/multiTestSession";
+import { defaultTestHeadersText, parseHeadersText } from "../lib/testHeaders";
 import { Modal } from "./Modal";
 
 type Props = {
@@ -20,10 +22,11 @@ type Props = {
   readonly models: readonly Model[];
   readonly prompts: readonly TestPrompt[];
   readonly onClose: () => void;
+  readonly onPromptsChanged: () => Promise<void>;
   readonly onToast: (msg: string) => void;
 };
 
-const FALLBACK_PROMPT = "请只回复一个单词：ok";
+const FALLBACK_PROMPT = "将123@qq.com转为Base64，直接回复结果";
 const DEFAULT_TIMEOUT = 30;
 
 type ListSort = "default" | "latency_asc" | "latency_desc";
@@ -54,6 +57,7 @@ export function BatchTestConnectionModal({
   models,
   prompts,
   onClose,
+  onPromptsChanged,
   onToast,
 }: Props) {
   const existing = getBatchTestSession();
@@ -102,6 +106,9 @@ export function BatchTestConnectionModal({
     return seeded?.id ?? "";
   });
   const [prompt, setPrompt] = useState(defaultPrompt);
+  const [saveName, setSaveName] = useState("");
+  const [saveBusy, setSaveBusy] = useState(false);
+  const preferPromptId = useRef<string | null>(null);
   const [timeoutSecs, setTimeoutSecs] = useState(
     resumeTimeout ?? DEFAULT_TIMEOUT,
   );
@@ -112,6 +119,33 @@ export function BatchTestConnectionModal({
   /** modelId -> expanded */
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [listSort, setListSort] = useState<ListSort>("default");
+  const [headersText, setHeadersText] = useState(() => defaultTestHeadersText(provider.protocol));
+  const [showHeaders, setShowHeaders] = useState(false);
+
+  useEffect(() => {
+    if (preferPromptId.current) {
+      const preferred = prompts.find((p) => p.id === preferPromptId.current);
+      if (preferred) {
+        setSelectedPromptId(preferred.id);
+        if (!busy) {
+          setPrompt(preferred.content);
+          setSaveName(preferred.isDefault ? "" : preferred.name);
+        }
+        return;
+      }
+    }
+    if (!selectedPromptId) {
+      const seeded = prompts.find((p) => p.isDefault) ?? prompts[0];
+      if (seeded) {
+        setSelectedPromptId(seeded.id);
+        preferPromptId.current = seeded.id;
+        if (!busy) {
+          setPrompt(seeded.content);
+          setSaveName(seeded.isDefault ? "" : seeded.name);
+        }
+      }
+    }
+  }, [prompts]);
 
   useEffect(() => {
     const un1 = subscribeBatchTestSession(() => setTick((n) => n + 1));
@@ -138,10 +172,91 @@ export function BatchTestConnectionModal({
   const queueLen = sessionSnap?.queueIds.length ?? 0;
 
 
+  const selectedPrompt = useMemo(
+    () => prompts.find((x) => x.id === selectedPromptId) ?? null,
+    [prompts, selectedPromptId],
+  );
+
   const applyPrompt = (id: string) => {
+    preferPromptId.current = id;
     setSelectedPromptId(id);
     const p = prompts.find((x) => x.id === id);
-    if (p) setPrompt(p.content);
+    if (p) {
+      setPrompt(p.content);
+      setSaveName(p.isDefault ? "" : p.name);
+    }
+  };
+
+  const savePrompt = async () => {
+    if (saveBusy || busy) return;
+    const name = saveName.trim();
+    const content = prompt.trim();
+    if (!name) {
+      onToast("请填写提示词名称");
+      return;
+    }
+    if (!content) {
+      onToast("提示词内容不能为空");
+      return;
+    }
+    setSaveBusy(true);
+    try {
+      const existing = prompts.find(
+        (p) => !p.isDefault && p.name.toLowerCase() === name.toLowerCase(),
+      );
+      const saved = await api.upsertTestPrompt({
+        id: existing?.id ?? null,
+        name,
+        content,
+      });
+      preferPromptId.current = saved.id;
+      setSelectedPromptId(saved.id);
+      setPrompt(saved.content);
+      setSaveName(saved.name);
+      await onPromptsChanged();
+      onToast(existing ? "提示词已更新" : "提示词已保存");
+    } catch (e) {
+      onToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
+  const setDefaultSelected = async () => {
+    const p = selectedPrompt;
+    if (!p) return;
+    if (p.isDefault) {
+      onToast("已是默认提示词");
+      return;
+    }
+    try {
+      const saved = await api.setDefaultTestPrompt(p.id);
+      preferPromptId.current = saved.id;
+      setSelectedPromptId(saved.id);
+      await onPromptsChanged();
+      onToast(`已将「${saved.name}」设为默认`);
+    } catch (e) {
+      onToast(`设置默认失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const deleteSelected = async () => {
+    const p = selectedPrompt;
+    if (!p) return;
+    if (p.isDefault) {
+      onToast("默认提示词不可删除，请先将其他提示词设为默认");
+      return;
+    }
+    try {
+      await api.deleteTestPrompt(p.id);
+      preferPromptId.current = null;
+      setSelectedPromptId("");
+      setSaveName("");
+      await onPromptsChanged();
+      onToast("已删除提示词");
+    } catch (e) {
+      onToast(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const displayRows: BatchRowState[] = useMemo(() => {
@@ -181,21 +296,25 @@ export function BatchTestConnectionModal({
     });
   }, [rows, models, sessionSnap, provider.id, tick]);
 
+  const rowLatencyMs = (r: BatchRowState): number | null => {
+    const live = r.result?.latencyMs;
+    if (typeof live === "number" && Number.isFinite(live)) return live;
+    // After restart, full result is memory-only; latency lives on disk summary.
+    const last = getLastTestResult(r.modelId)?.latencyMs;
+    return typeof last === "number" && Number.isFinite(last) ? last : null;
+  };
+
   const sortedRows = useMemo(() => {
     if (listSort === "default") return displayRows;
-    const latency = (r: BatchRowState): number | null => {
-      const ms = r.result?.latencyMs;
-      return typeof ms === "number" && Number.isFinite(ms) ? ms : null;
-    };
     return [...displayRows].sort((a, b) => {
-      const la = latency(a);
-      const lb = latency(b);
+      const la = rowLatencyMs(a);
+      const lb = rowLatencyMs(b);
       if (la == null && lb == null) return 0;
       if (la == null) return 1;
       if (lb == null) return -1;
       return listSort === "latency_asc" ? la - lb : lb - la;
     });
-  }, [displayRows, listSort]);
+  }, [displayRows, listSort, tick]);
 
   const summary = useMemo(() => {
     let ok = 0;
@@ -245,6 +364,7 @@ export function BatchTestConnectionModal({
       prompt: text,
       timeoutSecs: timeout,
       onlyEnabled,
+      extraHeaders: parseHeadersText(headersText),
     });
     setExpanded({});
     setTick((n) => n + 1);
@@ -298,7 +418,7 @@ export function BatchTestConnectionModal({
       </dl>
 
       <label className="mb-1 block text-xs text-ink-3">已保存提示词</label>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
+      <div className="mb-3 flex flex-wrap gap-2">
         <select
           className="input min-w-[12rem] flex-1"
           value={selectedPromptId}
@@ -313,6 +433,32 @@ export function BatchTestConnectionModal({
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
+          title={
+            selectedPrompt?.isDefault
+              ? "已是默认"
+              : "将当前选中的提示词设为默认（打开测试时优先使用）"
+          }
+          onClick={() => void setDefaultSelected()}
+        >
+          设为默认
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
+          title={
+            selectedPrompt?.isDefault
+              ? "默认提示词不可删除，请先设其他为默认"
+              : "删除当前非默认提示词"
+          }
+          onClick={() => void deleteSelected()}
+        >
+          删除
+        </button>
         <label className="flex items-center gap-1.5 text-xs text-ink-2">
           <input
             type="checkbox"
@@ -338,6 +484,73 @@ export function BatchTestConnectionModal({
         onChange={(e) => setPrompt(e.target.value)}
         placeholder={FALLBACK_PROMPT}
       />
+
+      <div className="mb-4 flex flex-wrap items-end gap-2">
+        <div className="min-w-[10rem] flex-1">
+          <label className="mb-1 block text-xs text-ink-3">另存为名称</label>
+          <input
+            className="input w-full"
+            value={saveName}
+            disabled={busy}
+            onChange={(e) => setSaveName(e.target.value)}
+            placeholder="例如：简短连通"
+          />
+        </div>
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={saveBusy || busy}
+          onClick={() => void savePrompt()}
+        >
+          {saveBusy ? "保存中…" : "保存提示词"}
+        </button>
+      </div>
+
+      <div className="mb-3">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-xs text-ink-3">
+            额外请求头
+            <span className="ml-1 text-ink-3/80">（覆盖同名 Provider headers）</span>
+          </label>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              className="btn-ghost !px-2 !py-0.5 text-xs"
+              disabled={busy}
+              onClick={() => setShowHeaders((v) => !v)}
+            >
+              {showHeaders ? "收起" : "展开"}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost !px-2 !py-0.5 text-xs"
+              disabled={busy}
+              title="按当前协议填入默认客户端头"
+              onClick={() => setHeadersText(defaultTestHeadersText(provider.protocol))}
+            >
+              填默认
+            </button>
+          </div>
+        </div>
+        {showHeaders ? (
+          <textarea
+            className="input min-h-[72px] w-full resize-y font-mono text-xs"
+            value={headersText}
+            disabled={busy}
+            onChange={(e) => setHeadersText(e.target.value)}
+            placeholder={"User-Agent: claude-cli/2.1.79\nx-app: cli"}
+            spellCheck={false}
+          />
+        ) : (
+          <p className="truncate rounded-md border border-surface-3 bg-surface-1 px-2 py-1.5 font-mono text-[11px] text-ink-3">
+            {headersText
+              .split(/\r?\n/)
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith("#"))
+              .join(" · ") || "（无额外请求头）"}
+          </p>
+        )}
+      </div>
 
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <div className="w-28">
@@ -445,7 +658,10 @@ export function BatchTestConnectionModal({
                   ) : null}
                 </div>
                 <span className="shrink-0 tabular-nums text-xs text-ink-3">
-                  {r.result ? `${r.result.latencyMs} ms` : "—"}
+                  {(() => {
+                    const ms = rowLatencyMs(r);
+                    return ms != null ? `${ms} ms` : "—";
+                  })()}
                 </span>
                 <button
                   type="button"

@@ -30,6 +30,8 @@ export type MultiTestSession = {
   readonly timeoutSecs: number;
   readonly onlyEnabled: boolean;
   readonly concurrency: number;
+  /** Extra HTTP headers applied to every request in this run. */
+  readonly extraHeaders: Readonly<Record<string, string>>;
   rows: MultiRowState[];
   busy: boolean;
   cancelled: boolean;
@@ -102,6 +104,7 @@ export type StartMultiArgs = {
   timeoutSecs: number;
   onlyEnabled: boolean;
   concurrency?: number;
+  extraHeaders?: Readonly<Record<string, string>>;
 };
 
 export function createMultiTestSession(args: StartMultiArgs): MultiTestSession {
@@ -138,6 +141,7 @@ export function createMultiTestSession(args: StartMultiArgs): MultiTestSession {
     timeoutSecs: args.timeoutSecs,
     onlyEnabled: args.onlyEnabled,
     concurrency: Math.max(1, Math.min(8, args.concurrency ?? DEFAULT_CONCURRENCY)),
+    extraHeaders: { ...(args.extraHeaders ?? {}) },
     rows,
     busy: false,
     cancelled: false,
@@ -154,8 +158,23 @@ export function requestStopMultiTest(): void {
   session.cancelled = true;
   for (const r of session.rows) {
     if (r.status === "running") {
-      appendRowLog(r.modelId, "[multi] stop requested…");
+      appendRowLog(r.modelId, "[multi] stop requested — finishing in-flight…");
     }
+  }
+  // Drop the rest of the queue immediately so UI leaves “待测” state.
+  session.rows = session.rows.map((r) =>
+    r.status === "pending"
+      ? {
+          ...r,
+          status: "skipped" as const,
+          error: null,
+          logs: [...r.logs, "[multi] skipped (stopped)"],
+        }
+      : r,
+  );
+  // Nothing in-flight: end session now (startMultiTest pump also clears on cancel).
+  if (!session.rows.some((r) => r.status === "running")) {
+    session.busy = false;
   }
   notify();
 }
@@ -211,7 +230,13 @@ async function runOneModel(
   notify();
 
   try {
-    const res = await api.testModelConnection(modelId, s.prompt, runId, s.timeoutSecs);
+    const res = await api.testModelConnection(
+      modelId,
+      s.prompt,
+      runId,
+      s.timeoutSecs,
+      s.extraHeaders,
+    );
     if (session?.id !== s.id) return;
 
     const ok = res.ok;
@@ -317,7 +342,12 @@ export async function startMultiTest(): Promise<void> {
 
     const pump = () => {
       if (finishIfDone()) return;
-      if (s.cancelled) return;
+      if (s.cancelled) {
+        // Drop waiters (rows already marked skipped in requestStopMultiTest).
+        waiting.clear();
+        if (active === 0) finishIfDone();
+        return;
+      }
 
       let scheduled = true;
       while (scheduled && active < s.concurrency && waiting.size > 0) {

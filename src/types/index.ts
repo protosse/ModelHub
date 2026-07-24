@@ -181,6 +181,10 @@ export type ImportPreviewItem = {
   readonly baseUrl: string;
   readonly protocol: Protocol;
   readonly modelCount: number;
+  readonly modelIds?: readonly string[];
+  readonly extraModelCount?: number;
+  readonly newModelIds?: readonly string[];
+  readonly existingModelIds?: readonly string[];
   readonly alreadyExists: boolean;
   readonly existingProviderId: string | null;
   readonly existingName: string | null;
@@ -190,6 +194,7 @@ export type ImportPreviewItem = {
 
 export type ImportPreview = {
   readonly items: readonly ImportPreviewItem[];
+  readonly scanNotes?: readonly string[];
 };
 
 export type ImportAction = "import" | "override" | "skip";
@@ -257,6 +262,50 @@ export function emptyBindings(): AgentBindings {
     pi: {
       providerId: null,
       modelId: null,
+    },
+  };
+}
+
+/** Drop dangling provider/model refs from a session draft after store mutations. */
+export function scrubBindings(
+  b: AgentBindings,
+  providers: readonly { readonly id: string }[],
+  models: readonly { readonly id: string }[],
+): AgentBindings {
+  const pids = new Set(providers.map((p) => p.id));
+  const mids = new Set(models.map((m) => m.id));
+  const keepP = (id: string | null): string | null =>
+    id && pids.has(id) ? id : null;
+  const keepM = (id: string | null): string | null =>
+    id && mids.has(id) ? id : null;
+
+  const claudeProviderId = keepP(b.claude.providerId);
+  const codexProviderId = keepP(b.codex.providerId);
+  const opencodeProviderId = keepP(b.opencode.providerId);
+  const piProviderId = keepP(b.pi.providerId);
+
+  return {
+    claude: {
+      ...b.claude,
+      providerId: claudeProviderId,
+      modelId: claudeProviderId ? keepM(b.claude.modelId) : null,
+      haikuModelId: keepM(b.claude.haikuModelId),
+      sonnetModelId: keepM(b.claude.sonnetModelId),
+      opusModelId: keepM(b.claude.opusModelId),
+    },
+    codex: {
+      ...b.codex,
+      providerId: codexProviderId,
+      modelId: codexProviderId ? keepM(b.codex.modelId) : null,
+    },
+    opencode: {
+      providerId: opencodeProviderId,
+      modelId: opencodeProviderId ? keepM(b.opencode.modelId) : null,
+      smallModelId: opencodeProviderId ? keepM(b.opencode.smallModelId) : null,
+    },
+    pi: {
+      providerId: piProviderId,
+      modelId: piProviderId ? keepM(b.pi.modelId) : null,
     },
   };
 }

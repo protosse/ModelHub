@@ -146,6 +146,9 @@ pub struct TestConnectionRequest {
     /// Request timeout in seconds (clamped server-side). Default 30.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional per-run extra HTTP headers (merged after provider.headers; same key overwrites).
+    #[serde(default)]
+    pub extra_headers: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +194,7 @@ pub fn seed_test_prompts() -> Vec<TestPrompt> {
     vec![TestPrompt {
         id: "prompt_default_connectivity".into(),
         name: "连通性探测".into(),
-        content: "请只回复一个单词：ok".into(),
+        content: "将123@qq.com转为Base64，直接回复结果".into(),
         is_default: true,
         created_at: "1970-01-01T00:00:00Z".into(),
         updated_at: "1970-01-01T00:00:00Z".into(),
@@ -393,6 +396,14 @@ pub struct ImportPreviewItem {
     pub base_url: String,
     pub protocol: Protocol,
     pub model_count: usize,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+    #[serde(default)]
+    pub extra_model_count: usize,
+    #[serde(default)]
+    pub new_model_ids: Vec<String>,
+    #[serde(default)]
+    pub existing_model_ids: Vec<String>,
     pub already_exists: bool,
     pub existing_provider_id: Option<String>,
     pub existing_name: Option<String>,
@@ -404,6 +415,8 @@ pub struct ImportPreviewItem {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
     pub items: Vec<ImportPreviewItem>,
+    #[serde(default)]
+    pub scan_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

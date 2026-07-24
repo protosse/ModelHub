@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { FullState, Model, Protocol, Provider, ProviderInput, RemoteModel } from "../types";
 import { PROTOCOLS } from "../types";
 import * as api from "../api/tauri";
@@ -15,6 +15,7 @@ import { getModelTestDisplay } from "../lib/testDisplay";
 
 type Props = {
   readonly state: FullState;
+  readonly active: boolean;
   readonly onRefresh: () => Promise<void>;
   readonly onToast: (msg: string) => void;
 };
@@ -25,7 +26,7 @@ type ConfirmState =
   | { kind: "deleteModel"; id: string; name: string }
   | null;
 
-export function ProvidersPage({ state, onRefresh, onToast }: Props) {
+export function ProvidersPage({ state, active, onRefresh, onToast }: Props) {
   const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
@@ -35,28 +36,62 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [multiTesting, setMultiTesting] = useState(false);
-  const [multiSessionTick, setMultiSessionTick] = useState(0);
-  useEffect(() => {
-    return subscribeMultiTestSession(() => setMultiSessionTick((n) => n + 1));
-  }, []);
 
-  const providers = useMemo(() => {
+  const sortedProviders = useMemo(() => {
     const list = [...state.store.providers];
     list.sort((a, b) => a.name.localeCompare(b.name, "zh"));
-    if (!q.trim()) return list;
-    const needle = q.trim().toLowerCase();
-    return list.filter(
-      (p) =>
-        p.name.toLowerCase().includes(needle) ||
-        p.baseUrl.toLowerCase().includes(needle) ||
-        p.protocol.includes(needle),
-    );
-  }, [state.store.providers, q]);
+    return list;
+  }, [state.store.providers]);
 
-  const selected = providers.find((p) => p.id === selectedId) ?? null;
+  const providers = useMemo(() => {
+    if (!q.trim()) return sortedProviders;
+    const needle = q.trim().toLowerCase();
+    // Search name only — URL/protocol substrings cause confusing single-letter hits.
+    return sortedProviders.filter((p) => p.name.toLowerCase().includes(needle));
+  }, [sortedProviders, q]);
+
+  // O1: one pass model counts instead of per-row filter.
+  const modelCountByProvider = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of state.store.models) {
+      map.set(m.providerId, (map.get(m.providerId) ?? 0) + 1);
+    }
+    return map;
+  }, [state.store.models]);
+
+  // Look up the selected provider in the FULL list, not the filtered
+  // `providers`, so the detail pane stays mounted while searching.
+  const selected = state.store.providers.find((p) => p.id === selectedId) ?? null;
   const models = selected
     ? state.store.models.filter((m) => m.providerId === selected.id)
     : [];
+
+  // B5: prune checkedIds / selectedId that no longer exist after store refresh.
+  const knownProviderIds = useMemo(
+    () => new Set(state.store.providers.map((p) => p.id)),
+    [state.store.providers],
+  );
+  useEffect(() => {
+    setCheckedIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (knownProviderIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    setSelectedId((prev) => (prev && !knownProviderIds.has(prev) ? null : prev));
+    setRemoteByProvider((prev) => {
+      let changed = false;
+      const next: Record<string, RemoteModel[]> = {};
+      for (const [id, list] of Object.entries(prev)) {
+        if (knownProviderIds.has(id)) next[id] = list;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [knownProviderIds]);
 
   const allChecked =
     providers.length > 0 && providers.every((p) => checkedIds.has(p.id));
@@ -70,9 +105,17 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
     });
   };
 
+  // B2: only touch currently visible (filtered) rows; keep selections outside filter.
   const toggleCheckAll = () => {
-    if (allChecked) setCheckedIds(new Set());
-    else setCheckedIds(new Set(providers.map((p) => p.id)));
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (allChecked) {
+        for (const p of providers) next.delete(p.id);
+      } else {
+        for (const p of providers) next.add(p.id);
+      }
+      return next;
+    });
   };
 
   const fetchModelsFor = async (providerId: string) => {
@@ -100,12 +143,22 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
           next.delete(confirm.id);
           return next;
         });
+        setRemoteByProvider((prev) => {
+          const next = { ...prev };
+          delete next[confirm.id];
+          return next;
+        });
         if (selectedId === confirm.id) setSelectedId(null);
         await onRefresh();
         onToast("已删除提供商");
       } else if (confirm.kind === "deleteMany") {
         const n = await api.deleteProviders(confirm.ids);
         setCheckedIds(new Set());
+        setRemoteByProvider((prev) => {
+          const next = { ...prev };
+          for (const id of confirm.ids) delete next[id];
+          return next;
+        });
         if (selectedId && confirm.ids.includes(selectedId)) setSelectedId(null);
         await onRefresh();
         onToast(`已删除 ${n} 个提供商`);
@@ -128,7 +181,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
         <div className="flex items-center gap-2">
           <input
             className="input"
-            placeholder="搜索名称 / URL / 协议"
+            placeholder="搜索名称"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -158,29 +211,22 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
             title="对勾选的提供商下模型做连通性测试（全局并发 3，同提供商串行）"
             onClick={() => setMultiTesting(true)}
           >
-            {(() => {
-              void multiSessionTick;
-              if (isMultiTestBusy()) {
-                const s = getMultiTestSession();
-                if (s && [...checkedIds].some((id) => s.providerIds.includes(id))) {
-                  return "测试中…";
-                }
-              }
-              return "测试所选";
-            })()}
+            <MultiTestSelectedLabel checkedIds={checkedIds} active={active} />
           </button>
         </div>
 
         <div className="card min-h-0 flex-1 overflow-auto">
-          {providers.length === 0 ? (
+          {state.store.providers.length === 0 ? (
             <div className="p-8 text-center text-sm text-ink-3">
               暂无提供商。可「新建」或到「导入」从本机配置导入。
             </div>
+          ) : providers.length === 0 ? (
+            <div className="p-8 text-center text-sm text-ink-3">无匹配结果</div>
           ) : (
             <ul className="divide-y divide-surface-3">
               {providers.map((p) => {
-                const count = state.store.models.filter((m) => m.providerId === p.id).length;
-                const active = p.id === selectedId;
+                const count = modelCountByProvider.get(p.id) ?? 0;
+                const isSelected = p.id === selectedId;
                 return (
                   <li key={p.id} className="flex items-stretch">
                     <label className="flex items-center px-3" onClick={(e) => e.stopPropagation()}>
@@ -193,7 +239,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
                     <button
                       type="button"
                       className={
-                        active
+                        isSelected
                           ? "min-w-0 flex-1 px-2 py-3 text-left bg-accent/10"
                           : "min-w-0 flex-1 px-2 py-3 text-left hover:bg-surface-2"
                       }
@@ -238,6 +284,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
             key={selected.id}
             provider={selected}
             models={models}
+            active={active}
             testPrompts={state.store.testPrompts ?? []}
             mask={state.secretMasks[selected.secretRef] ?? "••••"}
             remoteModels={remoteByProvider[selected.id] ?? []}
@@ -246,6 +293,14 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
             onFetch={() => void fetchModelsFor(selected.id)}
             onRefresh={onRefresh}
             onToast={onToast}
+            onProviderEdited={() =>
+              setRemoteByProvider((prev) => {
+                if (!prev[selected.id]) return prev;
+                const next = { ...prev };
+                delete next[selected.id];
+                return next;
+              })
+            }
             onRequestDelete={() =>
               setConfirm({ kind: "deleteOne", id: selected.id, name: selected.name })
             }
@@ -266,6 +321,7 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
           models={state.store.models}
           prompts={state.store.testPrompts ?? []}
           onClose={() => setMultiTesting(false)}
+          onPromptsChanged={onRefresh}
           onToast={onToast}
         />
       ) : null}
@@ -304,9 +360,158 @@ export function ProvidersPage({ state, onRefresh, onToast }: Props) {
   );
 }
 
+/** Per-row test status badge; self-subscribes to all four tick sources so it can update
+ *  independently of the parent (which only re-renders on batch-session changes).
+ *  Subscriptions are gated by `active` to avoid background re-renders when the
+ *  page is hidden; a forced tick on re-activation picks up missed updates. */
+const ModelTestStatusBadge = memo(function ModelTestStatusBadge({
+  modelId,
+  active,
+}: {
+  readonly modelId: string;
+  readonly active: boolean;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const sub = () => setTick((n) => n + 1);
+    const u1 = subscribeSingleTestSession(sub);
+    const u2 = subscribeBatchTestSession(sub);
+    const u3 = subscribeMultiTestSession(sub);
+    const u4 = subscribeLastTestResults(sub);
+    // Pick up any state that changed while the page was hidden.
+    setTick((n) => n + 1);
+    return () => {
+      u1();
+      u2();
+      u3();
+      u4();
+    };
+  }, [active]);
+
+  // Prefer live session row (pending/running/ok/fail) over stale last success.
+  const d = getModelTestDisplay(modelId);
+  const last = getLastTestResult(modelId);
+  // Prefer live latency, then persisted last.latencyMs (survives restart).
+  const latencyMs = d.latencyMs ?? last?.latencyMs ?? null;
+  const latencyLabel = latencyMs != null ? `${latencyMs} ms` : null;
+  const tipBase = last
+    ? `测试时间：${formatTestedAt(last.testedAt)}${
+        latencyMs != null ? ` · ${latencyMs} ms` : ""
+      }`
+    : latencyLabel ?? undefined;
+
+  if (d.status === "running") {
+    return <span className="badge bg-accent/20 text-accent">测试中</span>;
+  }
+  if (d.status === "pending" && (d.source === "multi" || d.source === "batch")) {
+    return <span className="badge bg-surface-3 text-ink-3">待测</span>;
+  }
+  if (d.status === "ok") {
+    return (
+      <span className="inline-flex items-center gap-1.5" title={tipBase}>
+        <span className="badge bg-ok/15 text-ok">成功</span>
+        {latencyLabel ? (
+          <span className="tabular-nums text-[11px] text-ink-3">{latencyLabel}</span>
+        ) : null}
+      </span>
+    );
+  }
+  if (d.status === "fail") {
+    return (
+      <span className="inline-flex items-center gap-1.5" title={tipBase}>
+        <span className="badge bg-danger/20 text-danger">失败</span>
+        {latencyLabel ? (
+          <span className="tabular-nums text-[11px] text-ink-3">{latencyLabel}</span>
+        ) : null}
+      </span>
+    );
+  }
+  if (d.status === "skipped" && (d.source === "multi" || d.source === "batch")) {
+    return <span className="badge bg-surface-3 text-ink-3">跳过</span>;
+  }
+  // Fallback: disk last result when no active session status.
+  if (!last) return <span className="text-xs text-ink-3">—</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5" title={tipBase}>
+      <span className={last.ok ? "badge bg-ok/15 text-ok" : "badge bg-danger/20 text-danger"}>
+        {last.ok ? "成功" : "失败"}
+      </span>
+      {latencyLabel ? (
+        <span className="tabular-nums text-[11px] text-ink-3">{latencyLabel}</span>
+      ) : null}
+    </span>
+  );
+});
+
+/** Per-row "测试" button label; self-subscribes to single-test session only. */
+const ModelTestButton = memo(function ModelTestButton({
+  modelId,
+  active,
+}: {
+  readonly modelId: string;
+  readonly active: boolean;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const unsub = subscribeSingleTestSession(() => setTick((n) => n + 1));
+    setTick((n) => n + 1);
+    return unsub;
+  }, [active]);
+  const s = getSingleTestSession();
+  if (s?.modelId === modelId && s.busy) return <>测试中…</>;
+  return <>测试</>;
+});
+
+/** "测试全部" button label; self-subscribes to batch-test session. */
+const BatchTestAllLabel = memo(function BatchTestAllLabel({
+  providerId,
+  active,
+}: {
+  readonly providerId: string;
+  readonly active: boolean;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const unsub = subscribeBatchTestSession(() => setTick((n) => n + 1));
+    setTick((n) => n + 1);
+    return unsub;
+  }, [active]);
+  const s = getBatchTestSession();
+  if (s?.providerId === providerId && s.busy) return <>测试中…</>;
+  return <>测试全部</>;
+});
+
+/** "测试所选" button label; self-subscribes to multi-test session. */
+const MultiTestSelectedLabel = memo(function MultiTestSelectedLabel({
+  checkedIds,
+  active,
+}: {
+  readonly checkedIds: ReadonlySet<string>;
+  readonly active: boolean;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const unsub = subscribeMultiTestSession(() => setTick((n) => n + 1));
+    setTick((n) => n + 1);
+    return unsub;
+  }, [active]);
+  if (isMultiTestBusy()) {
+    const s = getMultiTestSession();
+    if (s && [...checkedIds].some((id) => s.providerIds.includes(id))) {
+      return <>测试中…</>;
+    }
+  }
+  return <>测试所选</>;
+});
+
 function ProviderDetail({
   provider,
   models,
+  active,
   testPrompts,
   mask,
   remoteModels,
@@ -315,11 +520,13 @@ function ProviderDetail({
   onFetch,
   onRefresh,
   onToast,
+  onProviderEdited,
   onRequestDelete,
   onRequestDeleteModel,
 }: {
   readonly provider: Provider;
   readonly models: readonly Model[];
+  readonly active: boolean;
   readonly testPrompts: FullState["store"]["testPrompts"];
   readonly mask: string;
   readonly remoteModels: readonly RemoteModel[];
@@ -328,6 +535,7 @@ function ProviderDetail({
   readonly onFetch: () => void;
   readonly onRefresh: () => Promise<void>;
   readonly onToast: (msg: string) => void;
+  readonly onProviderEdited: () => void;
   readonly onRequestDelete: () => void;
   readonly onRequestDeleteModel: (id: string, name: string) => void;
 }) {
@@ -340,23 +548,6 @@ function ProviderDetail({
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [batchTesting, setBatchTesting] = useState(false);
-  const [batchSessionTick, setBatchSessionTick] = useState(0);
-
-  useEffect(() => {
-    return subscribeBatchTestSession(() => setBatchSessionTick((n) => n + 1));
-  }, []);
-  const [singleSessionTick, setSingleSessionTick] = useState(0);
-  useEffect(() => {
-    return subscribeSingleTestSession(() => setSingleSessionTick((n) => n + 1));
-  }, []);
-  const [lastTestTick, setLastTestTick] = useState(0);
-  useEffect(() => {
-    return subscribeLastTestResults(() => setLastTestTick((n) => n + 1));
-  }, []);
-  const [multiSessionTick, setMultiSessionTick] = useState(0);
-  useEffect(() => {
-    return subscribeMultiTestSession(() => setMultiSessionTick((n) => n + 1));
-  }, []);
 
   const testingModel = testingModelId
     ? models.find((m) => m.id === testingModelId) ?? null
@@ -404,7 +595,6 @@ function ProviderDetail({
               try {
                 await api.setProviderEnabled(provider.id, !provider.enabled);
                 await onRefresh();
-                onToast(provider.enabled ? "已关闭 OC/Pi 同步" : "已开启 OC/Pi 同步");
               } catch (e) {
                 onToast(`操作失败：${e instanceof Error ? e.message : String(e)}`);
               }
@@ -494,12 +684,7 @@ function ProviderDetail({
                 title="串行测试全部模型（并发 1）；关闭弹窗后测试仍继续"
                 onClick={() => setBatchTesting(true)}
               >
-                {(() => {
-                  void batchSessionTick;
-                  const s = getBatchTestSession();
-                  if (s?.providerId === provider.id && s.busy) return "测试中…";
-                  return "测试全部";
-                })()}
+                <BatchTestAllLabel providerId={provider.id} active={active} />
               </button>
               <button type="button" className="btn-primary" onClick={() => setAddingModel(true)}>
                 添加模型
@@ -575,74 +760,7 @@ function ProviderDetail({
                           </button>
                         </td>
                         <td className="py-2">
-                          {(() => {
-                            void lastTestTick;
-                            void singleSessionTick;
-                            void batchSessionTick;
-                            void multiSessionTick;
-                            // Prefer live session row (pending/running/ok/fail) over stale last success.
-                            const d = getModelTestDisplay(m.id);
-                            if (d.status === "running") {
-                              return (
-                                <span className="badge bg-accent/20 text-accent">测试中</span>
-                              );
-                            }
-                            if (d.status === "pending" && (d.source === "multi" || d.source === "batch")) {
-                              return (
-                                <span className="badge bg-surface-3 text-ink-3">待测</span>
-                              );
-                            }
-                            if (d.status === "ok") {
-                              const last = getLastTestResult(m.id);
-                              const tip = last
-                                ? `测试时间：${formatTestedAt(last.testedAt)}${
-                                    last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
-                                  }`
-                                : d.latencyMs != null
-                                  ? `${d.latencyMs} ms`
-                                  : undefined;
-                              return (
-                                <span className="badge bg-ok/15 text-ok" title={tip}>
-                                  成功
-                                </span>
-                              );
-                            }
-                            if (d.status === "fail") {
-                              const last = getLastTestResult(m.id);
-                              const tip = last
-                                ? `测试时间：${formatTestedAt(last.testedAt)}${
-                                    last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
-                                  }`
-                                : undefined;
-                              return (
-                                <span className="badge bg-danger/20 text-danger" title={tip}>
-                                  失败
-                                </span>
-                              );
-                            }
-                            if (d.status === "skipped" && (d.source === "multi" || d.source === "batch")) {
-                              return (
-                                <span className="badge bg-surface-3 text-ink-3">跳过</span>
-                              );
-                            }
-                            // Fallback: disk last result when no active session status
-                            const last = getLastTestResult(m.id);
-                            if (!last) {
-                              return <span className="text-xs text-ink-3">—</span>;
-                            }
-                            const tip = `测试时间：${formatTestedAt(last.testedAt)}${
-                              last.latencyMs != null ? ` · ${last.latencyMs} ms` : ""
-                            }`;
-                            return last.ok ? (
-                              <span className="badge bg-ok/15 text-ok" title={tip}>
-                                成功
-                              </span>
-                            ) : (
-                              <span className="badge bg-danger/20 text-danger" title={tip}>
-                                失败
-                              </span>
-                            );
-                          })()}
+                          <ModelTestStatusBadge modelId={m.id} active={active} />
                         </td>
                         <td className="py-2 text-right">
                           <div className="flex justify-end gap-1">
@@ -651,12 +769,7 @@ function ProviderDetail({
                               className="btn-secondary !px-2 !py-1 text-xs"
                               onClick={() => setTestingModelId(m.id)}
                             >
-                              {(() => {
-                                void singleSessionTick;
-                                const s = getSingleTestSession();
-                                if (s?.modelId === m.id && s.busy) return "测试中…";
-                                return "测试";
-                              })()}
+                              <ModelTestButton modelId={m.id} active={active} />
                             </button>
                             <button
                               type="button"
@@ -692,6 +805,7 @@ function ProviderDetail({
           onSubmit={async (input) => {
             await api.updateProvider(provider.id, input);
             await onRefresh();
+            onProviderEdited();
             onToast("已保存");
             setEditing(false);
           }}
@@ -705,18 +819,29 @@ function ProviderDetail({
           remoteModels={remoteModels}
           onClose={() => setAddingModel(false)}
           onSubmit={async (items) => {
-            for (const item of items) {
-              await api.addModel({
-                providerId: provider.id,
-                modelId: item.modelId,
-                displayName: item.displayName,
-                enabled: item.enabled,
-                capabilities: { reasoning: false, vision: false },
-              });
+            try {
+              await api.addModels(
+                items.map((item) => ({
+                  providerId: provider.id,
+                  modelId: item.modelId,
+                  displayName: item.displayName,
+                  enabled: item.enabled,
+                  capabilities: { reasoning: false, vision: false },
+                })),
+              );
+              await onRefresh();
+              onToast(`已添加 ${items.length} 个模型`);
+              setAddingModel(false);
+            } catch (e) {
+              // Batch is atomic on the backend; still refresh in case of races.
+              try {
+                await onRefresh();
+              } catch {
+                /* ignore */
+              }
+              // Re-throw so ModelFormModal can surface the error and stay open.
+              throw e;
             }
-            await onRefresh();
-            onToast(`已添加 ${items.length} 个模型`);
-            setAddingModel(false);
           }}
         />
       ) : null}
@@ -740,6 +865,7 @@ function ProviderDetail({
           models={models}
           prompts={testPrompts}
           onClose={() => setBatchTesting(false)}
+          onPromptsChanged={onRefresh}
           onToast={onToast}
         />
       ) : null}
@@ -1017,6 +1143,7 @@ function ProviderFormModal({
               });
             } catch (e) {
               setErr(e instanceof Error ? e.message : String(e));
+            } finally {
               setBusy(false);
             }
           }}
@@ -1045,15 +1172,44 @@ function ModelFormModal({
 }) {
   const available = remoteModels.filter((m) => !existingIds.has(m.id));
   const [mode, setMode] = useState<"pick" | "manual">(available.length > 0 ? "pick" : "manual");
-  const [picked, setPicked] = useState<string[]>(available.slice(0, 1).map((m) => m.id));
+  // Don't pre-select the first remote model — user chooses explicitly.
+  const [picked, setPicked] = useState<string[]>([]);
+  const [pickQuery, setPickQuery] = useState("");
   const [modelId, setModelId] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   void providerId;
+
+  const filteredAvailable = useMemo(() => {
+    const needle = pickQuery.trim().toLowerCase();
+    if (!needle) return available;
+    return available.filter(
+      (m) =>
+        m.id.toLowerCase().includes(needle) ||
+        (m.name && m.name.toLowerCase().includes(needle)),
+    );
+  }, [available, pickQuery]);
+
+  const allFilteredPicked =
+    filteredAvailable.length > 0 &&
+    filteredAvailable.every((m) => picked.includes(m.id));
 
   const togglePick = (id: string) => {
     setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const togglePickAllFiltered = () => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (allFilteredPicked) {
+        for (const m of filteredAvailable) next.delete(m.id);
+      } else {
+        for (const m of filteredAvailable) next.add(m.id);
+      }
+      return [...next];
+    });
   };
 
   return (
@@ -1082,30 +1238,61 @@ function ModelFormModal({
           {available.length === 0 ? (
             <p className="text-sm text-ink-3">请先点「获取模型」，或改用手动填写。</p>
           ) : (
-            <ul className="max-h-64 space-y-1 overflow-auto rounded-md border border-surface-3 p-2">
-              {available.map((m) => (
-                <li key={m.id}>
-                  <label className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-surface-2">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={picked.includes(m.id)}
-                      onChange={() => togglePick(m.id)}
-                    />
-                    <span>
-                      <span className="font-mono text-xs">{m.id}</span>
-                      {m.name !== m.id ? (
-                        <span className="ml-2 text-ink-3">{m.name}</span>
-                      ) : null}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
+            <>
+              <input
+                className="input !py-1.5 text-sm"
+                placeholder="搜索 Model ID / 名称"
+                value={pickQuery}
+                onChange={(e) => setPickQuery(e.target.value)}
+              />
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <label className="flex items-center gap-2 text-ink-2">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredPicked}
+                    disabled={filteredAvailable.length === 0}
+                    onChange={togglePickAllFiltered}
+                  />
+                  全选
+                </label>
+                <span className="text-xs text-ink-3">
+                  已选 {picked.length} / {available.length}
+                  {pickQuery.trim()
+                    ? ` · 当前 ${filteredAvailable.length} 项`
+                    : null}
+                </span>
+              </div>
+              {filteredAvailable.length === 0 ? (
+                <p className="rounded-md border border-surface-3 p-3 text-sm text-ink-3">
+                  无匹配模型
+                </p>
+              ) : (
+                <ul className="max-h-64 space-y-1 overflow-auto rounded-md border border-surface-3 p-2">
+                  {filteredAvailable.map((m) => (
+                    <li key={m.id}>
+                      <label className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm hover:bg-surface-2">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={picked.includes(m.id)}
+                          onChange={() => togglePick(m.id)}
+                        />
+                        <span>
+                          <span className="font-mono text-xs">{m.id}</span>
+                          {m.name !== m.id ? (
+                            <span className="ml-2 text-ink-3">{m.name}</span>
+                          ) : null}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
           <label className="flex items-center gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            添加后启用（参与 OC/Pi 同步）
+            启用
           </label>
         </div>
       ) : (
@@ -1130,19 +1317,39 @@ function ModelFormModal({
         </div>
       )}
 
+      {err ? <div className="mt-3 text-sm text-danger">{err}</div> : null}
       <div className="mt-5 flex justify-end gap-2">
-        <button type="button" className="btn-secondary" onClick={onClose}>
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
           取消
         </button>
         <button
           type="button"
           className="btn-primary"
-          disabled={busy}
+          disabled={
+            busy ||
+            (mode === "pick" ? picked.length === 0 : !modelId.trim())
+          }
           onClick={async () => {
+            setErr(null);
+            if (mode === "pick") {
+              if (picked.length === 0) {
+                setErr("请至少选择一个模型");
+                return;
+              }
+            } else {
+              const id = modelId.trim();
+              if (!id) {
+                setErr("请填写 Model ID");
+                return;
+              }
+              if (existingIds.has(id)) {
+                setErr(`模型已存在：${id}`);
+                return;
+              }
+            }
             setBusy(true);
             try {
               if (mode === "pick") {
-                if (picked.length === 0) return;
                 const items = picked.map((id) => {
                   const meta = available.find((m) => m.id === id);
                   return {
@@ -1153,15 +1360,17 @@ function ModelFormModal({
                 });
                 await onSubmit(items);
               } else {
-                if (!modelId.trim()) return;
+                const id = modelId.trim();
                 await onSubmit([
                   {
-                    modelId: modelId.trim(),
-                    displayName: displayName.trim() || modelId.trim(),
+                    modelId: id,
+                    displayName: displayName.trim() || id,
                     enabled,
                   },
                 ]);
               }
+            } catch (e) {
+              setErr(e instanceof Error ? e.message : String(e));
             } finally {
               setBusy(false);
             }
@@ -1187,6 +1396,7 @@ function CloneModal({
   const [key, setKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   return (
     <Modal onClose={onClose}>
@@ -1213,9 +1423,10 @@ function CloneModal({
             </button>
           </div>
         </div>
+        {err ? <div className="text-sm text-danger">{err}</div> : null}
       </div>
       <div className="mt-5 flex justify-end gap-2">
-        <button type="button" className="btn-secondary" onClick={onClose}>
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
           取消
         </button>
         <button
@@ -1223,8 +1434,15 @@ function CloneModal({
           className="btn-primary"
           disabled={busy || !name.trim() || !key.trim()}
           onClick={async () => {
+            setErr(null);
             setBusy(true);
-            await onSubmit(name.trim(), key.trim());
+            try {
+              await onSubmit(name.trim(), key.trim());
+            } catch (e) {
+              setErr(e instanceof Error ? e.message : String(e));
+            } finally {
+              setBusy(false);
+            }
           }}
         >
           克隆

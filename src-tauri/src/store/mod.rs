@@ -40,14 +40,9 @@ impl StoreService {
         self.ensure_dirs()?;
         let path = self.paths.store_file();
         let mut store: Store = read_json_or_default(&path)?;
-        let before = store.test_prompts.len();
-        let had_default = store.test_prompts.iter().any(|p| p.is_default);
-        ensure_default_test_prompt(&mut store);
-        // Persist seed for older store.json files that lack prompts.
-        if path.exists()
-            && (store.test_prompts.len() != before
-                || (!had_default && store.test_prompts.iter().any(|p| p.is_default)))
-        {
+        let changed = ensure_default_test_prompt(&mut store);
+        // Persist seed/migration for older store.json files.
+        if path.exists() && changed {
             let _ = self.save_store(&store);
         }
         Ok(store)
@@ -177,7 +172,6 @@ impl StoreService {
         provider.notes = input.notes;
         provider.updated_at = now.clone();
         let secret_ref = provider.secret_ref.clone();
-        // Allow clearing? no. Empty means keep. Non-empty replaces.
         if !input.api_key.is_empty() {
             secrets.secrets.insert(
                 secret_ref,
@@ -279,6 +273,11 @@ impl StoreService {
         if !store.providers.iter().any(|p| p.id == input.provider_id) {
             anyhow::bail!("provider not found");
         }
+        if store.models.iter().any(|m| {
+            m.provider_id == input.provider_id && m.model_id == input.model_id
+        }) {
+            anyhow::bail!("模型已存在：{}", input.model_id);
+        }
         let now = now_iso();
         let model = Model {
             id: format!("mdl_{}", Uuid::new_v4()),
@@ -295,10 +294,56 @@ impl StoreService {
         Ok(model)
     }
 
+    /// Add multiple models in a single store read + write. Bails before saving if
+    /// any provider_id is unknown or any model_id duplicates, so the batch is atomic.
+    pub fn add_models(&self, inputs: Vec<ModelInput>) -> Result<Vec<Model>> {
+        let mut store = self.load_store()?;
+        let now = now_iso();
+        let mut out = Vec::with_capacity(inputs.len());
+        let mut batch_seen = std::collections::HashSet::<(String, String)>::new();
+        for input in inputs {
+            if !store.providers.iter().any(|p| p.id == input.provider_id) {
+                anyhow::bail!("provider not found: {}", input.provider_id);
+            }
+            let key = (input.provider_id.clone(), input.model_id.clone());
+            if !batch_seen.insert(key.clone()) {
+                anyhow::bail!("本批存在重复模型：{}", input.model_id);
+            }
+            if store
+                .models
+                .iter()
+                .any(|m| m.provider_id == input.provider_id && m.model_id == input.model_id)
+            {
+                anyhow::bail!("模型已存在：{}", input.model_id);
+            }
+            let model = Model {
+                id: format!("mdl_{}", Uuid::new_v4()),
+                provider_id: input.provider_id,
+                model_id: input.model_id,
+                display_name: input.display_name,
+                enabled: input.enabled,
+                capabilities: input.capabilities,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            store.models.push(model.clone());
+            out.push(model);
+        }
+        self.save_store(&store)?;
+        Ok(out)
+    }
+
     pub fn update_model(&self, id: &str, input: ModelInput) -> Result<Model> {
         let mut store = self.load_store()?;
         if !store.providers.iter().any(|p| p.id == input.provider_id) {
             anyhow::bail!("provider not found");
+        }
+        if store.models.iter().any(|m| {
+            m.id != id
+                && m.provider_id == input.provider_id
+                && m.model_id == input.model_id
+        }) {
+            anyhow::bail!("模型已存在：{}", input.model_id);
         }
         let model = store
             .models
@@ -493,24 +538,55 @@ impl StoreService {
     }
 }
 
-fn ensure_default_test_prompt(store: &mut Store) {
+/// Ensure a default connectivity prompt exists.
+/// Returns true if the store was mutated (caller may want to persist).
+///
+/// Content is only migrated when it still matches the *previous* seed text,
+/// so user edits to the default prompt are preserved across loads.
+fn ensure_default_test_prompt(store: &mut Store) -> bool {
+    /// Previous default prompt body (pre seed-content change).
+    const LEGACY_SEED_CONTENT: &str = "请只回复一个单词：ok";
+
+    let seed = seed_test_prompts().into_iter().next().unwrap();
+    let mut changed = false;
+
     if store.test_prompts.is_empty() {
-        store.test_prompts = seed_test_prompts();
-        return;
+        store.test_prompts = vec![seed];
+        return true;
     }
+
+    if let Some(p) = store
+        .test_prompts
+        .iter_mut()
+        .find(|p| p.id == seed.id || p.name.eq_ignore_ascii_case(&seed.name))
+    {
+        // One-shot migration of the old seed body only.
+        if p.content == LEGACY_SEED_CONTENT && p.content != seed.content {
+            p.content = seed.content.clone();
+            p.updated_at = now_iso();
+            changed = true;
+        }
+        if p.id != seed.id {
+            p.id = seed.id.clone();
+            changed = true;
+        }
+    }
+
     if !store.test_prompts.iter().any(|p| p.is_default) {
-        // Prefer matching seed by id/name; otherwise prepend seed default.
-        let seed = seed_test_prompts().into_iter().next().unwrap();
         if let Some(p) = store
             .test_prompts
             .iter_mut()
             .find(|p| p.id == seed.id || p.name.eq_ignore_ascii_case(&seed.name))
         {
             p.is_default = true;
+            changed = true;
         } else {
             store.test_prompts.insert(0, seed);
+            changed = true;
         }
     }
+
+    changed
 }
 
 fn clear_bindings_for_provider(b: &mut AgentBindings, provider_id: &str) {
@@ -565,10 +641,12 @@ pub fn now_iso() -> String {
 }
 
 pub fn mask_key(key: &str) -> String {
-    if key.len() <= 4 {
+    let char_count = key.chars().count();
+    if char_count <= 4 {
         return "****".into();
     }
-    format!("••••{}", &key[key.len() - 4..])
+    let tail: String = key.chars().skip(char_count - 4).collect();
+    format!("••••{tail}")
 }
 
 pub fn normalize_base_url(url: &str) -> String {

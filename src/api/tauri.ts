@@ -61,6 +61,10 @@ export async function addModel(input: ModelInput): Promise<Model> {
   return invoke("add_model", { input });
 }
 
+export async function addModels(inputs: ModelInput[]): Promise<Model[]> {
+  return invoke("add_models", { inputs });
+}
+
 export async function updateModel(id: string, input: ModelInput): Promise<Model> {
   return invoke("update_model", { id, input });
 }
@@ -181,6 +185,7 @@ export async function testModelConnection(
   prompt: string,
   runId?: string,
   timeoutSecs?: number,
+  extraHeaders?: Readonly<Record<string, string>> | null,
 ): Promise<TestConnectionResult> {
   return invoke("test_model_connection", {
     request: {
@@ -188,6 +193,7 @@ export async function testModelConnection(
       prompt,
       runId: runId ?? null,
       timeoutSecs: timeoutSecs ?? null,
+      extraHeaders: extraHeaders && Object.keys(extraHeaders).length > 0 ? extraHeaders : null,
     },
   });
 }

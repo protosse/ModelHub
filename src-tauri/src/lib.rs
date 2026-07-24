@@ -17,6 +17,7 @@ pub fn run() {
             commands::clone_provider,
             commands::set_provider_enabled,
             commands::add_model,
+            commands::add_models,
             commands::update_model,
             commands::delete_model,
             commands::save_bindings,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Layout } from "./components/Layout";
 import { AgentsPage } from "./pages/AgentsPage";
 import { ApplyPage } from "./pages/ApplyPage";
@@ -8,7 +8,7 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import * as api from "./api/tauri";
 import type { AgentBindings, FullState, PageId } from "./types";
-import { emptyBindings } from "./types";
+import { emptyBindings, scrubBindings } from "./types";
 import { hydrateLastTestResults } from "./lib/lastTestResults";
 
 /** Stable empty draft so ApplyPage doesn't treat every parent render as a change. */
@@ -29,15 +29,33 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [draftBindings, setDraftBindings] = useState<AgentBindings | null>(null);
 
+  const toastTimer = useRef<ReturnType<typeof window.setTimeout>>(null);
   const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
     setToast(msg);
-    window.setTimeout(() => setToast(null), 4000);
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null;
+      setToast(null);
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    };
   }, []);
 
   const refresh = useCallback(async () => {
     const s = await api.getState();
     hydrateLastTestResults(s.store.modelTestResults ?? {});
     setState(s);
+    // Drop session-draft refs that no longer exist after store mutations.
+    setDraftBindings((prev) => {
+      if (!prev) return prev;
+      const next = scrubBindings(prev, s.store.providers, s.store.models);
+      // Avoid identity churn when nothing was dangling.
+      return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+    });
     setError(null);
   }, []);
 
@@ -89,7 +107,12 @@ export default function App() {
       {/* Mount once on first visit, then keep alive across tab switches. */}
       {visited.has("providers") ? (
         <div className={pagePaneClass(page === "providers")}>
-          <ProvidersPage state={state} onRefresh={refresh} onToast={showToast} />
+          <ProvidersPage
+            state={state}
+            active={page === "providers"}
+            onRefresh={refresh}
+            onToast={showToast}
+          />
         </div>
       ) : null}
       {visited.has("agents") ? (
@@ -113,7 +136,13 @@ export default function App() {
       ) : null}
       {visited.has("import") ? (
         <div className={pagePaneClass(page === "import")}>
-          <ImportPage state={state} onRefresh={refresh} onToast={showToast} />
+          <ImportPage
+            state={state}
+            active={page === "import"}
+            onRefresh={refresh}
+            onToast={showToast}
+            onGoProviders={() => navigate("providers")}
+          />
         </div>
       ) : null}
       {visited.has("backups") ? (

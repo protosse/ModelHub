@@ -25,6 +25,8 @@ export type BatchTestSession = {
   readonly timeoutSecs: number;
   readonly onlyEnabled: boolean;
   readonly models: readonly Model[];
+  /** Extra HTTP headers for every model in this run. */
+  readonly extraHeaders: Readonly<Record<string, string>>;
   rows: BatchRowState[];
   busy: boolean;
   cancelled: boolean;
@@ -106,6 +108,7 @@ export type StartBatchArgs = {
   prompt: string;
   timeoutSecs: number;
   onlyEnabled: boolean;
+  extraHeaders?: Readonly<Record<string, string>>;
 };
 
 export function createBatchTestSession(args: StartBatchArgs): BatchTestSession {
@@ -124,6 +127,7 @@ export function createBatchTestSession(args: StartBatchArgs): BatchTestSession {
     timeoutSecs: args.timeoutSecs,
     onlyEnabled: args.onlyEnabled,
     models: args.models,
+    extraHeaders: { ...(args.extraHeaders ?? {}) },
     rows: args.models.map((m) => {
       const last = getLastTestResult(m.id);
       return {
@@ -153,7 +157,25 @@ export function requestStopBatchTest(): void {
   if (!session || !session.busy) return;
   session.cancelled = true;
   if (session.activeModelId) {
-    appendRowLog(session.activeModelId, "[batch] stop requested…");
+    appendRowLog(session.activeModelId, "[batch] stop requested — finishing current, skip rest…");
+  }
+  // Immediately mark not-yet-started rows so the UI reacts (pending would look stuck).
+  session.rows = session.rows.map((r) =>
+    r.status === "pending"
+      ? {
+          ...r,
+          status: "skipped" as const,
+          error: null,
+          logs: [...r.logs, "[batch] skipped (stopped)"],
+        }
+      : r,
+  );
+  // No in-flight model (race / empty queue): free the session now.
+  if (!session.rows.some((r) => r.status === "running")) {
+    session.activeRunId = null;
+    session.activeModelId = null;
+    session.currentIndex = -1;
+    session.busy = false;
   }
   notify();
 }
@@ -225,6 +247,7 @@ export async function startBatchTest(): Promise<void> {
         s.prompt,
         runId,
         s.timeoutSecs,
+        s.extraHeaders,
       );
       if (session?.id !== s.id) break;
 
@@ -295,6 +318,18 @@ export async function startBatchTest(): Promise<void> {
   }
 
   if (session?.id === s.id) {
+    // Safety: any leftover pending after cancel/break → skipped.
+    if (s.cancelled) {
+      s.rows = s.rows.map((r) =>
+        r.status === "pending"
+          ? {
+              ...r,
+              status: "skipped" as const,
+              logs: [...r.logs, "[batch] skipped (stopped)"],
+            }
+          : r,
+      );
+    }
     s.activeRunId = null;
     s.activeModelId = null;
     s.currentIndex = -1;
