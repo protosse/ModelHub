@@ -14,7 +14,12 @@ import {
 import { getModelTestDisplay } from "../lib/testDisplay";
 import { getLastTestResult, subscribeLastTestResults } from "../lib/lastTestResults";
 import { getMultiTestSession, requestStopMultiTest, subscribeMultiTestSession } from "../lib/multiTestSession";
-import { defaultTestHeadersText, parseHeadersText } from "../lib/testHeaders";
+import {
+  defaultTestHeadersText,
+  headerOverrideLines,
+  parseHeadersText,
+  protocolAutoHeadersSummary,
+} from "../lib/testHeaders";
 import { Modal } from "./Modal";
 
 type Props = {
@@ -119,7 +124,8 @@ export function BatchTestConnectionModal({
   /** modelId -> expanded */
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [listSort, setListSort] = useState<ListSort>("default");
-  const [headersText, setHeadersText] = useState(() => defaultTestHeadersText(provider.protocol));
+  // Empty by default: backend injects per-protocol client defaults.
+  const [headersText, setHeadersText] = useState("");
   const [showHeaders, setShowHeaders] = useState(false);
 
   useEffect(() => {
@@ -417,101 +423,103 @@ export function BatchTestConnectionModal({
         </div>
       </dl>
 
-      <label className="mb-1 block text-xs text-ink-3">已保存提示词</label>
-      <div className="mb-3 flex flex-wrap gap-2">
-        <select
-          className="input min-w-[12rem] flex-1"
-          value={selectedPromptId}
-          disabled={busy}
-          onChange={(e) => applyPrompt(e.target.value)}
-        >
-          {prompts.length === 0 ? <option value="">（无）</option> : null}
-          {prompts.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-              {p.isDefault ? "（默认）" : ""}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
-          title={
-            selectedPrompt?.isDefault
-              ? "已是默认"
-              : "将当前选中的提示词设为默认（打开测试时优先使用）"
-          }
-          onClick={() => void setDefaultSelected()}
-        >
-          设为默认
-        </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
-          title={
-            selectedPrompt?.isDefault
-              ? "默认提示词不可删除，请先设其他为默认"
-              : "删除当前非默认提示词"
-          }
-          onClick={() => void deleteSelected()}
-        >
-          删除
-        </button>
-        <label className="flex items-center gap-1.5 text-xs text-ink-2">
-          <input
-            type="checkbox"
-            checked={onlyEnabled}
-            disabled={busy}
-            onChange={(e) => setOnlyEnabled(e.target.checked)}
-          />
-          仅测试已启用
-        </label>
-      </div>
-
-      <label className="mb-1 block text-xs text-ink-3">提示词</label>
-      <textarea
-        className="input mb-3 min-h-[96px] w-full resize-y font-mono text-xs"
-        value={
-          sessionSnap?.busy
-            ? sessionSnap.prompt
-            : multiBusy && multiExisting
-              ? multiExisting.prompt
-              : prompt
-        }
-        disabled={busy}
-        onChange={(e) => setPrompt(e.target.value)}
-        placeholder={FALLBACK_PROMPT}
-      />
-
-      <div className="mb-4 flex flex-wrap items-end gap-2">
-        <div className="min-w-[10rem] flex-1">
-          <label className="mb-1 block text-xs text-ink-3">另存为名称</label>
-          <input
-            className="input w-full"
-            value={saveName}
-            disabled={busy}
-            onChange={(e) => setSaveName(e.target.value)}
-            placeholder="例如：简短连通"
-          />
+      <div className="mb-3 rounded-lg border border-surface-3 bg-surface-1/40 p-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-medium text-ink-2">提示词</div>
+          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+            <input
+              type="checkbox"
+              checked={onlyEnabled}
+              disabled={busy}
+              onChange={(e) => setOnlyEnabled(e.target.checked)}
+            />
+            仅测试已启用
+          </label>
         </div>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={saveBusy || busy}
-          onClick={() => void savePrompt()}
-        >
-          {saveBusy ? "保存中…" : "保存提示词"}
-        </button>
+        <label className="mb-1 block text-xs text-ink-3">已保存</label>
+        <div className="mb-2 flex flex-wrap gap-2">
+          <select
+            className="input min-w-[12rem] flex-1"
+            value={selectedPromptId}
+            disabled={busy}
+            onChange={(e) => applyPrompt(e.target.value)}
+          >
+            {prompts.length === 0 ? <option value="">（无）</option> : null}
+            {prompts.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.isDefault ? "（默认）" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
+            title={
+              selectedPrompt?.isDefault
+                ? "已是默认"
+                : "将当前选中的提示词设为默认（打开测试时优先使用）"
+            }
+            onClick={() => void setDefaultSelected()}
+          >
+            设为默认
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy || !selectedPrompt || selectedPrompt.isDefault}
+            title={
+              selectedPrompt?.isDefault
+                ? "默认提示词不可删除，请先设其他为默认"
+                : "删除当前非默认提示词"
+            }
+            onClick={() => void deleteSelected()}
+          >
+            删除
+          </button>
+        </div>
+
+        <label className="mb-1 block text-xs text-ink-3">内容</label>
+        <textarea
+          className="input mb-2 min-h-[96px] w-full resize-y font-mono text-xs"
+          value={
+            sessionSnap?.busy
+              ? sessionSnap.prompt
+              : multiBusy && multiExisting
+                ? multiExisting.prompt
+                : prompt
+          }
+          disabled={busy}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={FALLBACK_PROMPT}
+        />
+
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="min-w-[10rem] flex-1">
+            <label className="mb-1 block text-xs text-ink-3">另存为名称</label>
+            <input
+              className="input w-full"
+              value={saveName}
+              disabled={busy}
+              onChange={(e) => setSaveName(e.target.value)}
+              placeholder="例如：简短连通"
+            />
+          </div>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={saveBusy || busy}
+            onClick={() => void savePrompt()}
+          >
+            {saveBusy ? "保存中…" : "保存提示词"}
+          </button>
+        </div>
       </div>
 
       <div className="mb-3">
         <div className="mb-1 flex items-center justify-between gap-2">
-          <label className="text-xs text-ink-3">
-            额外请求头
-            <span className="ml-1 text-ink-3/80">（覆盖同名 Provider headers）</span>
-          </label>
+          <label className="text-xs text-ink-3">请求头</label>
           <div className="flex gap-1">
             <button
               type="button"
@@ -519,35 +527,53 @@ export function BatchTestConnectionModal({
               disabled={busy}
               onClick={() => setShowHeaders((v) => !v)}
             >
-              {showHeaders ? "收起" : "展开"}
+              {showHeaders ? "收起" : "自定义"}
             </button>
+            {headerOverrideLines(headersText).length > 0 ? (
+              <button
+                type="button"
+                className="btn-ghost !px-2 !py-0.5 text-xs"
+                disabled={busy}
+                title="去掉自定义覆盖，恢复协议自动默认"
+                onClick={() => setHeadersText("")}
+              >
+                清除覆盖
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {showHeaders ? (
+          <div className="space-y-1.5">
+            <p className="text-[11px] leading-relaxed text-ink-3">
+              已自动附加：{protocolAutoHeadersSummary(provider.protocol)}。
+              下方仅写需要覆盖/追加的行；留空则只用自动默认 + Provider headers。
+            </p>
+            <textarea
+              className="input min-h-[72px] w-full resize-y font-mono text-xs"
+              value={headersText}
+              disabled={busy}
+              onChange={(e) => setHeadersText(e.target.value)}
+              placeholder={
+                "# 可选覆盖，例如：\n" + defaultTestHeadersText(provider.protocol)
+              }
+              spellCheck={false}
+            />
             <button
               type="button"
               className="btn-ghost !px-2 !py-0.5 text-xs"
               disabled={busy}
-              title="按当前协议填入默认客户端头"
+              title="把本协议默认客户端头写入覆盖框（一般不必）"
               onClick={() => setHeadersText(defaultTestHeadersText(provider.protocol))}
             >
-              填默认
+              用协议默认作覆盖
             </button>
           </div>
-        </div>
-        {showHeaders ? (
-          <textarea
-            className="input min-h-[72px] w-full resize-y font-mono text-xs"
-            value={headersText}
-            disabled={busy}
-            onChange={(e) => setHeadersText(e.target.value)}
-            placeholder={"User-Agent: claude-cli/2.1.79\nx-app: cli"}
-            spellCheck={false}
-          />
         ) : (
           <p className="truncate rounded-md border border-surface-3 bg-surface-1 px-2 py-1.5 font-mono text-[11px] text-ink-3">
-            {headersText
-              .split(/\r?\n/)
-              .map((l) => l.trim())
-              .filter((l) => l && !l.startsWith("#"))
-              .join(" · ") || "（无额外请求头）"}
+            自动 {protocolAutoHeadersSummary(provider.protocol)}
+            {headerOverrideLines(headersText).length > 0
+              ? ` · 覆盖 ${headerOverrideLines(headersText).join(" · ")}`
+              : ""}
           </p>
         )}
       </div>

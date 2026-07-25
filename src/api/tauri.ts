@@ -73,6 +73,10 @@ export async function deleteModel(id: string): Promise<void> {
   return invoke("delete_model", { id });
 }
 
+export async function deleteModels(ids: readonly string[]): Promise<number> {
+  return invoke("delete_models", { ids: [...ids] });
+}
+
 export async function readLiveBindings(): Promise<AgentBindings> {
   return invoke("read_live_bindings");
 }

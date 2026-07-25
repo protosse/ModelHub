@@ -97,6 +97,7 @@ ModelHub 库（持久）
 #### 3.1.2 操作
 
 - 新建 / 编辑 / 删除（二次确认）；列表多选、全选、批量删除  
+- **编辑保存后**：刷新密钥遮罩；详情「显示」缓存的明文密钥清空，需重新点「显示」以见最新 key（避免改 key 后仍显示旧值）  
 - **列表搜索**：**仅匹配 Provider 名称**（大小写不敏感子串）；不搜 URL / 协议  
 - **全选**：仅作用于**当前搜索结果（可见列表）**；勾选=并入可见 ID，取消=仅去掉可见 ID；筛选外已勾项保留（与导入页「清空当前」同语义）  
 - **空态**：库为空 →「暂无提供商…」；库非空但搜索无命中 →「无匹配结果」  
@@ -115,6 +116,7 @@ ModelHub 库（持久）
 - 远程列表缓存按 **providerId** 隔离；**编辑 baseUrl/协议等连接信息后清空该 Provider 缓存**；删除 Provider 时同步清缓存  
 - 编辑 Model ID / 展示名 / 启用；Model ID 可手输，有远程缓存时可选取回填  
 - 启用开关样式明显（已启用 / 已禁用）  
+- **模型列表多选**：行勾选 + 全选；**删除所选**二次确认；后端 `delete_models` 批量一次落盘  
 - **baseUrl 可点击**：系统浏览器打开（热区限文字）  
 
 ##### 连通性测试
@@ -131,7 +133,8 @@ ModelHub 库（持久）
 | 关弹窗 | **不中断**；single / batch / multi 模块级 session 保活 |
 | 测试全部 | **串行**；可选仅已启用；**停止**：待测立刻标跳过，当前请求跑完后结束会话；行内响应时间：优先本轮 `result.latencyMs`，否则回退 `modelTestResults.latencyMs`（重启后仍显示） |
 | 测试所选 | **全局并发 3**，**同提供商串行**；**停止**：待测立刻标跳过，进行中请求跑完后结束会话；响应时间回退规则同「测试全部」 |
-| 额外请求头 | 三个测试弹窗均可编辑（`Key: Value` 多行）；合并顺序 **provider.headers → 本轮 extraHeaders**（同名覆盖）；默认：`anthropic-messages` → `User-Agent: claude-cli/2.1.79` + `x-app: cli`；OpenAI 系 → `User-Agent: openai-node`；「填默认」可恢复；仅本轮测试生效，不写回 Provider |
+| 请求头 | 默认按协议自动注入客户端头（折叠行展示摘要）；弹窗可「自定义」写 `Key: Value` 覆盖/追加。合并：`协议默认 → provider.headers → 本轮覆盖`。协议默认：`anthropic-messages` → `User-Agent: claude-cli/2.1.79` + `x-app: cli` + `anthropic-beta: context-1m-2025-08-07`（兼容强制 1M 上下文的 Claude 中继）；OpenAI 系 → `User-Agent: openai-node`。混测时各模型各自用协议默认，自定义为整轮全局覆盖。有覆盖时显示「清除覆盖」。仅本轮生效，不写回 Provider |
+| 提示词区 | 已保存选择 / 内容 / 另存为名称 / 保存 归为同一「提示词」分组；另存为名称紧挨内容下方 |
 | 跨入口共享 | `lastTestResults` + session；列表测过的结果可在详情看到 |
 | 提示词 | `store.testPrompts`；默认种子「连通性探测」内容：`将123@qq.com转为Base64，直接回复结果`；可设默认/删（默认不可删）；**单测与批量弹窗均支持保存/设默认/删除** |
 | 日志 | 脱敏；详细日志 **仅内存**；清空单测日志同步清共享缓存，避免批量结果回填 |
@@ -139,9 +142,40 @@ ModelHub 库（持久）
 | 协议 | completions / responses / anthropic-messages；completions/anthropic 用小 `max_tokens`；**responses 不发送 `max_output_tokens`**（兼容拒绝该参数的第三方网关） |
 | 触发 | **仅用户点击发送/开始** 才请求 |
 
-### 3.2 导入（Import）
+### 3.2 模型一览（Models overview）
 
-#### 3.2.1 数据源与取 Key
+跨提供商的**选型工作台**：看哪些模型最近测通、谁响应更快。不替代提供商页的配置/CRUD。
+
+#### 3.2.1 定位
+
+| 项 | 行为 |
+|----|------|
+| 入口 | 主导航「模型一览」（`PageId=models`），位于「提供商」之后 |
+| 行 | 库内每一个 Model（关联 Provider） |
+| **可用** | **最近一次连通性测试成功**（与 `modelTestResults` / 内存 session 一致）；**不**展示、**不**用 Provider/Model 的 OC·Pi `enabled` |
+| 响应时间 | 有则显示 ms（成功/失败都显示）；重启后从落盘摘要恢复 |
+| 测试共享 | 与提供商页同一套 single/batch/multi session + `lastTestResults`；两边结果互通 |
+| 非目标 | 本页不做模型增删改、不做 enabled 切换、不做用量/余额/历史曲线 |
+
+#### 3.2.2 筛选 / 排序 / 摘要
+
+- 搜索：Model ID / 展示名 / 提供商名  
+- 连通性 **chips**（带数量）：全部 / 可用 / 失败 / 未测；数量随搜索·提供商·协议变化，**不含**状态 chip 自身  
+- 提供商、协议筛选  
+- 默认排序：可用优先 → 响应时间升序 → 失败 → 未测；另有耗时↑↓、最近测试、Model ID  
+- 仅当 session 内确有 **running/排队 pending** 时显示「测试中 / 排队」；**未测 ≠ 进行中**  
+- 可用中位耗时（基于当前搜索/提供商/协议范围下的可用行）  
+
+#### 3.2.3 操作
+
+- 行内「测试」：单模型弹窗（与提供商页相同）  
+- **测当前列表** / **测所选**：复用 multi 批量会话（全局并发 3、同提供商串行）；弹窗内可再调「仅已启用」等  
+- 点击提供商名 → 跳转「提供商」并选中该 Provider  
+- 全选当前筛选结果（勾选语义与列表可见集合一致）  
+
+### 3.3 导入（Import）
+
+#### 3.3.1 数据源与取 Key
 
 | 源 | 配置 | Key 来源 |
 |----|------|----------|
@@ -152,14 +186,14 @@ ModelHub 库（持久）
 
 扫描失败时 `scanNotes` 按源给出可读错误（解析失败等），不阻断其它源。
 
-#### 3.2.2 合并与去重
+#### 3.3.2 合并与去重
 
 - **同一 baseUrl + protocol** = 同一端点，跨 Agent **合并一行**（来源 `opencode+pi+codex`）  
 - 合并时 **优先保留非空 apiKey**  
 - **已存在**：同端点已在 ModelHub（**不比较模型集合**）  
 - **名称**：全局唯一；冲突可改名 / 自动改名（`name-2` 递增避让）  
 
-#### 3.2.3 覆盖语义（增量）
+#### 3.3.3 覆盖语义（增量）
 
 勾选已存在项 = **覆盖**：
 
@@ -170,7 +204,7 @@ ModelHub 库（持久）
 
 预览字段：`extraModelCount`、`newModelIds`（绿）、`existingModelIds`（灰）。
 
-#### 3.2.4 默认勾选与动作
+#### 3.3.4 默认勾选与动作
 
 | 行类型 | 默认勾选 | 勾选后动作 |
 |--------|----------|------------|
@@ -181,7 +215,7 @@ ModelHub 库（持久）
 
 无「动作」下拉：**不勾选 = 跳过**。
 
-#### 3.2.5 筛选与批量勾选（精简）
+#### 3.3.5 筛选与批量勾选（精简）
 
 **状态筛选（互斥 chip）：**
 
@@ -207,7 +241,7 @@ ModelHub 库（持久）
 
 列表排序：新+有 Key → 新无 Key → 可补模型 → 其它；同组按名称。
 
-#### 3.2.6 校验与确认
+#### 3.3.6 校验与确认
 
 - 名称空 / 本批重名 / 与库冲突（**含覆盖行改名撞到其它 Provider**）：行内红字；失败时 **清筛选并滚到首个错误行**  
 - 实时冲突检测与提交校验共用同一套规则；**仅勾选中的行**参与冲突（未勾选的已存在行不误报）  
@@ -216,19 +250,19 @@ ModelHub 库（持久）
 - 导入中 `importing` 与扫描 `scanning` 分离  
 - 导入失败：可能已部分落盘 → 刷新库 + **保留勾选/改名** 再扫（`keep` 模式），避免 UI 与磁盘不一致  
 
-#### 3.2.7 导入后
+#### 3.3.7 导入后
 
 - 单条 Toast 摘要（含无 Key 提示）  
 - 结果条：无 Key 列表（导入时 **id+名称快照**，二次扫描丢项仍可显示）+ **查看提供商**  
 - 刷新预览（`clear` 模式：保留改名、全部取消勾选）  
 
-#### 3.2.8 状态模型与保活
+#### 3.3.8 状态模型与保活
 
 - 前端单源：`ImportItem = ImportPreviewItem + selected + error`（无 preview/rows 双表）  
 - 重扫合并模式：`defaults`（默认勾选）/ `keep`（保留勾选与改名）/ `clear`（保留改名、全不勾）  
 - **Tab 保活**：再次进入时若库（providers/models）相对上次扫描已变，**静默 `keep` 重扫**，避免陈旧「已存在/可补」  
 
-#### 3.2.9 行 UI
+#### 3.3.9 行 UI
 
 - 卡片行：名称可编辑、状态 badge、协议缩写、模型展开  
 - 展开模型列表：**绿色** = 将新增，**灰色** = 库内已有（跳过）；无图例文案  
@@ -238,9 +272,9 @@ ModelHub 库（持久）
 
 组件：`ImportPage.tsx` + `ImportRow.tsx`。
 
-### 3.3 Agent 绑定（会话草稿）
+### 3.4 Agent 绑定（会话草稿）
 
-#### 3.3.1 生命周期
+#### 3.4.1 生命周期
 
 | 事件 | 行为 |
 |------|------|
@@ -252,7 +286,7 @@ ModelHub 库（持久）
 | 关闭应用 | 草稿丢失 |
 | 应用同步 | 请求携带 `bindings` |
 
-#### 3.3.2 各 Agent
+#### 3.4.2 各 Agent
 
 | Agent | 绑定 | 磁盘解读要点 |
 |-------|------|----------------|
@@ -263,7 +297,7 @@ ModelHub 库（持久）
 
 切换 Provider 时 **自动选中该 Provider 下第一个模型**。
 
-### 3.4 应用同步（Apply）
+### 3.5 应用同步（Apply）
 
 1. 选择 Agent（默认全选；可全选/清空）  
 2. Diff：磁盘 → 按会话草稿 Apply 后  
@@ -284,12 +318,12 @@ ModelHub 库（持久）
 | OpenCode | 合并 enabled providers + 默认 model |
 | Pi | 合并 enabled + defaultProvider/Model |
 
-### 3.5 备份
+### 3.6 备份
 
 - Apply 前备份到 `~/.modelhub/backups/<agent>/<timestamp>/`  
 - `backupKeepCount` 默认 10  
 
-### 3.6 设置
+### 3.7 设置
 
 - 语言、备份份数、数据目录、路径检测（路径编辑可后续增强）  
 
@@ -347,6 +381,7 @@ ModelHub 库（持久）
 | get_state | 库 + 路径 + 密钥遮罩 |
 | Provider/Model CRUD、clone、enabled、delete 批量 | 库维护 |
 | add_models | 批量添加模型（单次 load+save） |
+| delete_models | 批量删除模型（单次 load+save） |
 | fetch_provider_models | 远程模型列表 |
 | preview_import / run_import | 导入 |
 | read_live_bindings | 磁盘绑定 |
@@ -363,6 +398,7 @@ ModelHub 库（持久）
 ```text
 ModelHub
 ├── 提供商      # 列表 + 详情（默认模型 Tab）；测试全部 / 测试所选
+├── 模型一览    # 跨提供商连通性/响应时间选型（不展示 OC·Pi enabled）
 ├── Agent 绑定  # 磁盘 + 即时草稿 + 重置
 ├── 应用同步    # 选 Agent + Diff + Apply
 ├── 导入        # 扫描 / 筛选 / 勾选 / 确认
@@ -372,13 +408,14 @@ ModelHub
 
 - 全局：「应用更改」→ 应用同步  
 - 弹窗：Esc / 遮罩关闭；删除二次确认  
+- **ConfirmDialog**：Enter 确认、Esc 取消（处理中忽略）；确认钮默认聚焦  
 - Toast：右下角  
 
 ### 建议源码结构
 
 ```text
 src/
-  pages/          Providers Agents Apply Import Backups Settings
+  pages/          Providers Models Agents Apply Import Backups Settings
   components/     Layout Modal Toast ImportRow TestConnection*
   lib/            *TestSession lastTestResults testDisplay openExternal
 src-tauri/src/
@@ -431,6 +468,9 @@ src-tauri/src/
 | 24 | 删除库项后 scrub 会话 draftBindings |
 | 25 | 导入覆盖保留 headers/compat/enabled；失败后 keep 重扫 |
 | 26 | 添加模型：远程列表不预选、可全选；批量 `add_models` |
+| 27 | 详情模型列表多选 + 批量 `delete_models`；ConfirmDialog Enter 确认 |
+| 28 | 编辑 Provider 保存后清空详情明文密钥缓存 |
+| 29 | **模型一览**页：跨 Provider 连通性/耗时选型；与提供商页共享测试结果；不展示 enabled |
 
 ---
 
@@ -472,4 +512,10 @@ src-tauri/src/
 | 2026-07-24 | 连通性测试：`openai-responses` 请求体去掉 `max_output_tokens`（兼容拒绝该参数的第三方网关）；completions/anthropic 仍用小 `max_tokens` |
 | 2026-07-24 | 连通性测试：三弹窗支持额外请求头（默认 Claude Code / openai-node 客户端标识）；`test_model_connection.extraHeaders` 合并 provider.headers |
 | 2026-07-24 | 最近测试列展示持久化的 `latencyMs`（成功/失败旁显示 ms；重启后从 `modelTestResults` 恢复） |
+| 2026-07-24 | 编辑 Provider 后刷新密钥显示缓存；模型列表全选/批量删除（`delete_models`）；ConfirmDialog 支持回车确认 |
+| 2026-07-24 | 新增「模型一览」：全局模型表、可用性/耗时筛选排序、测当前列表/测所选、跳转提供商；测试结果与提供商页共享 |
+| 2026-07-24 | 模型一览筛选：状态 chips+计数；去掉推荐视图；修正未测被计为「进行中」 |
+| 2026-07-24 | 连通性请求头：后端按协议自动合并默认客户端头；multi 混测不再共用一份 Claude UA |
+| 2026-07-25 | 连通性弹窗：提示词区合并（另存为名称下移）；请求头改为自动摘要 + 可选自定义，去掉「填说明」 |
+| 2026-07-25 | anthropic 连通性默认增加 `anthropic-beta: context-1m-2025-08-07`（anyrouter 等 1M 强制中继） |
 

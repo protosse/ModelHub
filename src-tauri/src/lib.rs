@@ -20,6 +20,7 @@ pub fn run() {
             commands::add_models,
             commands::update_model,
             commands::delete_model,
+            commands::delete_models,
             commands::save_bindings,
             commands::read_live_bindings,
             commands::apply_config,

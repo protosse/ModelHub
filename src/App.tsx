@@ -5,6 +5,7 @@ import { ApplyPage } from "./pages/ApplyPage";
 import { BackupsPage } from "./pages/BackupsPage";
 import { ImportPage } from "./pages/ImportPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
+import { ModelsPage } from "./pages/ModelsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import * as api from "./api/tauri";
 import type { AgentBindings, FullState, PageId } from "./types";
@@ -28,6 +29,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [draftBindings, setDraftBindings] = useState<AgentBindings | null>(null);
+  const [focusProviderId, setFocusProviderId] = useState<string | null>(null);
 
   const toastTimer = useRef<ReturnType<typeof window.setTimeout>>(null);
   const showToast = useCallback((msg: string) => {
@@ -112,6 +114,22 @@ export default function App() {
             active={page === "providers"}
             onRefresh={refresh}
             onToast={showToast}
+            focusProviderId={focusProviderId}
+            onFocusProviderConsumed={() => setFocusProviderId(null)}
+          />
+        </div>
+      ) : null}
+      {visited.has("models") ? (
+        <div className={pagePaneClass(page === "models")}>
+          <ModelsPage
+            state={state}
+            active={page === "models"}
+            onRefresh={refresh}
+            onToast={showToast}
+            onOpenProvider={(providerId) => {
+              setFocusProviderId(providerId);
+              navigate("providers");
+            }}
           />
         </div>
       ) : null}

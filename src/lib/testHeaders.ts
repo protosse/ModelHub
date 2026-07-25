@@ -9,6 +9,8 @@ export function defaultTestHeaders(protocol: Protocol): Record<string, string> {
     return {
       "User-Agent": "claude-cli/2.1.79",
       "x-app": "cli",
+      // Relays that force 1M context (anyrouter etc.) reject without this beta.
+      "anthropic-beta": "context-1m-2025-08-07",
     };
   }
   // openai-completions / openai-responses
@@ -43,15 +45,22 @@ export function defaultTestHeadersText(protocol: Protocol): string {
   return headersToText(defaultTestHeaders(protocol));
 }
 
-/** Multi-provider: show both defaults as a starting point (user can edit). */
-export function multiDefaultTestHeadersText(): string {
-  return [
-    "# Anthropic / Claude Code style (for anthropic-messages providers)",
-    "User-Agent: claude-cli/2.1.79",
-    "x-app: cli",
-    "",
-    "# Note: same headers are applied to every request in this run.",
-    "# For OpenAI-only gateways you may prefer:",
-    "# User-Agent: openai-node",
-  ].join("\n");
+/** Non-comment Key:Value lines from the override textarea. */
+export function headerOverrideLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+}
+
+/** Compact summary of protocol-auto defaults for collapsed UI. */
+export function protocolAutoHeadersSummary(protocol?: Protocol): string {
+  if (protocol === "anthropic-messages") {
+    return "User-Agent: claude-cli · x-app: cli · anthropic-beta: context-1m";
+  }
+  if (protocol === "openai-completions" || protocol === "openai-responses") {
+    return "User-Agent: openai-node";
+  }
+  // multi / unknown: both families
+  return "anthropic → claude-cli+1m · openai → openai-node";
 }

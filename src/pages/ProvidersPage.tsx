@@ -18,17 +18,38 @@ type Props = {
   readonly active: boolean;
   readonly onRefresh: () => Promise<void>;
   readonly onToast: (msg: string) => void;
+  /** Optional: focus a provider when navigating from 模型一览 etc. */
+  readonly focusProviderId?: string | null;
+  readonly onFocusProviderConsumed?: () => void;
 };
 
 type ConfirmState =
   | { kind: "deleteOne"; id: string; name: string }
   | { kind: "deleteMany"; ids: string[] }
   | { kind: "deleteModel"; id: string; name: string }
+  | { kind: "deleteModelsMany"; ids: string[] }
   | null;
 
-export function ProvidersPage({ state, active, onRefresh, onToast }: Props) {
+export function ProvidersPage({
+  state,
+  active,
+  onRefresh,
+  onToast,
+  focusProviderId = null,
+  onFocusProviderConsumed,
+}: Props) {
   const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focusProviderId) return;
+    if (!state.store.providers.some((p) => p.id === focusProviderId)) {
+      onFocusProviderConsumed?.();
+      return;
+    }
+    setSelectedId(focusProviderId);
+    onFocusProviderConsumed?.();
+  }, [focusProviderId, state.store.providers, onFocusProviderConsumed]);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [showCreate, setShowCreate] = useState(false);
   const [remoteByProvider, setRemoteByProvider] = useState<Record<string, RemoteModel[]>>({});
@@ -166,6 +187,10 @@ export function ProvidersPage({ state, active, onRefresh, onToast }: Props) {
         await api.deleteModel(confirm.id);
         await onRefresh();
         onToast("已删除模型");
+      } else if (confirm.kind === "deleteModelsMany") {
+        const n = await api.deleteModels(confirm.ids);
+        await onRefresh();
+        onToast(`已删除 ${n} 个模型`);
       }
       setConfirm(null);
     } catch (e) {
@@ -307,6 +332,9 @@ export function ProvidersPage({ state, active, onRefresh, onToast }: Props) {
             onRequestDeleteModel={(id, name) =>
               setConfirm({ kind: "deleteModel", id, name })
             }
+            onRequestDeleteModels={(ids) =>
+              setConfirm({ kind: "deleteModelsMany", ids })
+            }
           />
         ) : (
           <div className="card flex h-full items-center justify-center p-8 text-sm text-ink-3">
@@ -341,13 +369,19 @@ export function ProvidersPage({ state, active, onRefresh, onToast }: Props) {
 
       {confirm ? (
         <ConfirmDialog
-          title={confirm.kind === "deleteModel" ? "删除模型" : "删除提供商"}
+          title={
+            confirm.kind === "deleteModel" || confirm.kind === "deleteModelsMany"
+              ? "删除模型"
+              : "删除提供商"
+          }
           message={
             confirm.kind === "deleteMany"
               ? `确定删除选中的 ${confirm.ids.length} 个提供商？\n此操作不可撤销。`
               : confirm.kind === "deleteOne"
                 ? `确定删除提供商「${confirm.name}」？\n此操作不可撤销。`
-                : `确定删除模型「${confirm.name}」？`
+                : confirm.kind === "deleteModelsMany"
+                  ? `确定删除选中的 ${confirm.ids.length} 个模型？\n此操作不可撤销。`
+                  : `确定删除模型「${confirm.name}」？`
           }
           confirmLabel="删除"
           danger
@@ -523,6 +557,7 @@ function ProviderDetail({
   onProviderEdited,
   onRequestDelete,
   onRequestDeleteModel,
+  onRequestDeleteModels,
 }: {
   readonly provider: Provider;
   readonly models: readonly Model[];
@@ -538,6 +573,7 @@ function ProviderDetail({
   readonly onProviderEdited: () => void;
   readonly onRequestDelete: () => void;
   readonly onRequestDeleteModel: (id: string, name: string) => void;
+  readonly onRequestDeleteModels: (ids: string[]) => void;
 }) {
   const [tab, setTab] = useState<"connect" | "models">("models");
   const [editing, setEditing] = useState(false);
@@ -548,6 +584,40 @@ function ProviderDetail({
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [batchTesting, setBatchTesting] = useState(false);
+  const [checkedModelIds, setCheckedModelIds] = useState<Set<string>>(new Set());
+
+  // Drop model checks that no longer exist after refresh/delete.
+  useEffect(() => {
+    const alive = new Set(models.map((m) => m.id));
+    setCheckedModelIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (alive.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [models]);
+
+  const allModelsChecked =
+    models.length > 0 && models.every((m) => checkedModelIds.has(m.id));
+
+  const toggleCheckAllModels = () => {
+    setCheckedModelIds(() => {
+      if (allModelsChecked) return new Set();
+      return new Set(models.map((m) => m.id));
+    });
+  };
+
+  const toggleModelCheck = (id: string) => {
+    setCheckedModelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const testingModel = testingModelId
     ? models.find((m) => m.id === testingModelId) ?? null
@@ -665,44 +735,73 @@ function ProviderDetail({
           </dl>
         ) : (
           <div>
-            <div className="mb-3 flex items-center justify-end gap-2">
-              {remoteModels.length > 0 ? (
-                <span className="text-xs text-ink-3">已缓存 {remoteModels.length} 个</span>
-              ) : null}
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={fetchDisabled}
-                onClick={onFetch}
-              >
-                {fetching ? "获取中…" : "获取模型"}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={models.length === 0}
-                title="串行测试全部模型（并发 1）；关闭弹窗后测试仍继续"
-                onClick={() => setBatchTesting(true)}
-              >
-                <BatchTestAllLabel providerId={provider.id} active={active} />
-              </button>
-              <button type="button" className="btn-primary" onClick={() => setAddingModel(true)}>
-                添加模型
-              </button>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm">
+                {models.length > 0 ? (
+                  <>
+                    <label className="flex items-center gap-2 text-ink-2">
+                      <input
+                        type="checkbox"
+                        checked={allModelsChecked}
+                        onChange={toggleCheckAllModels}
+                      />
+                      全选
+                    </label>
+                    <span className="text-ink-3">已选 {checkedModelIds.size}</span>
+                    <button
+                      type="button"
+                      className="btn-danger !py-1 text-xs"
+                      disabled={checkedModelIds.size === 0}
+                      onClick={() => onRequestDeleteModels([...checkedModelIds])}
+                    >
+                      删除所选
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                {remoteModels.length > 0 ? (
+                  <span className="text-xs text-ink-3">已缓存 {remoteModels.length} 个</span>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={fetchDisabled}
+                  onClick={onFetch}
+                >
+                  {fetching ? "获取中…" : "获取模型"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={models.length === 0}
+                  title="串行测试全部模型（并发 1）；关闭弹窗后测试仍继续"
+                  onClick={() => setBatchTesting(true)}
+                >
+                  <BatchTestAllLabel providerId={provider.id} active={active} />
+                </button>
+                <button type="button" className="btn-primary" onClick={() => setAddingModel(true)}>
+                  添加模型
+                </button>
+              </div>
             </div>
             {models.length === 0 ? (
               <div className="text-sm text-ink-3">暂无模型。可「获取模型」后添加，或手动填写。</div>
             ) : (
               <table className="w-full table-fixed text-left text-sm">
                 <colgroup>
-                  <col className="w-[28%]" />
-                  <col className="w-[20%]" />
+                  <col className="w-[4%]" />
+                  <col className="w-[26%]" />
+                  <col className="w-[18%]" />
                   <col className="w-[12%]" />
                   <col className="w-[12%]" />
                   <col className="w-[28%]" />
                 </colgroup>
                 <thead className="text-xs text-ink-3">
                   <tr>
+                    <th className="pb-2 pr-1 font-medium">
+                      <span className="sr-only">选择</span>
+                    </th>
                     <th className="pb-2 pr-2 font-medium">Model ID</th>
                     <th className="pb-2 pr-2 font-medium">展示名</th>
                     <th className="pb-2 font-medium">启用</th>
@@ -727,6 +826,14 @@ function ProviderDetail({
                       />
                     ) : (
                       <tr key={m.id} className="border-t border-surface-3">
+                        <td className="py-2 pr-1">
+                          <input
+                            type="checkbox"
+                            checked={checkedModelIds.has(m.id)}
+                            onChange={() => toggleModelCheck(m.id)}
+                            aria-label={`选择模型 ${m.modelId}`}
+                          />
+                        </td>
                         <td className="truncate py-2 pr-2 font-mono text-xs" title={m.modelId}>
                           {m.modelId}
                         </td>
@@ -804,6 +911,10 @@ function ProviderDetail({
           onClose={() => setEditing(false)}
           onSubmit={async (input) => {
             await api.updateProvider(provider.id, input);
+            // Always re-fetch plain key after edit so UI doesn't keep a stale cache
+            // (empty apiKey means "leave unchanged", but mask/plain may still need refresh).
+            setShowKey(false);
+            setPlainKey(null);
             await onRefresh();
             onProviderEdited();
             onToast("已保存");
@@ -935,6 +1046,7 @@ function ModelEditRow({
 
   return (
     <tr className="border-t border-surface-3 bg-surface-0/40">
+      <td className="py-2 pr-1 align-middle" />
       <td className="py-2 pr-2 align-middle">
         <div className="relative w-full min-w-0" ref={pickerRef}>
           <input

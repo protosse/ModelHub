@@ -226,6 +226,7 @@ export type BackupEntry = {
 
 export type PageId =
   | "providers"
+  | "models"
   | "agents"
   | "apply"
   | "import"

@@ -3,6 +3,7 @@ import { Toast } from "./Toast";
 
 const NAV: readonly { id: PageId; label: string }[] = [
   { id: "providers", label: "提供商" },
+  { id: "models", label: "模型一览" },
   { id: "agents", label: "Agent 绑定" },
   { id: "apply", label: "应用同步" },
   { id: "import", label: "导入" },

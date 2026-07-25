@@ -83,6 +83,12 @@ pub fn delete_model(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn delete_models(ids: Vec<String>) -> Result<usize, String> {
+    let (svc, _) = svc()?;
+    svc.delete_models(&ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn save_bindings(bindings: AgentBindings) -> Result<(), String> {
     let (svc, _) = svc()?;
     svc.save_bindings(bindings).map_err(|e| e.to_string())

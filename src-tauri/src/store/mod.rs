@@ -362,16 +362,38 @@ impl StoreService {
     }
 
     pub fn delete_model(&self, id: &str) -> Result<()> {
-        let mut store = self.load_store()?;
-        let before = store.models.len();
-        store.models.retain(|m| m.id != id);
-        if store.models.len() == before {
+        let n = self.delete_models(&[id.to_string()])?;
+        if n == 0 {
             anyhow::bail!("model not found");
         }
-        clear_bindings_for_model(&mut store.agent_bindings, id);
-        store.model_test_results.remove(id);
-        self.save_store(&store)?;
         Ok(())
+    }
+
+    /// Batch-delete models in a single load/save. Unknown ids are ignored.
+    /// Returns how many models were actually removed.
+    pub fn delete_models(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let id_set: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut store = self.load_store()?;
+        let before = store.models.len();
+        let removed: Vec<String> = store
+            .models
+            .iter()
+            .filter(|m| id_set.contains(m.id.as_str()))
+            .map(|m| m.id.clone())
+            .collect();
+        if removed.is_empty() {
+            return Ok(0);
+        }
+        store.models.retain(|m| !id_set.contains(m.id.as_str()));
+        for mid in &removed {
+            clear_bindings_for_model(&mut store.agent_bindings, mid);
+            store.model_test_results.remove(mid);
+        }
+        self.save_store(&store)?;
+        Ok(before - store.models.len())
     }
 
     pub fn save_bindings(&self, bindings: AgentBindings) -> Result<()> {

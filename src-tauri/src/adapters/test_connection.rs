@@ -114,8 +114,19 @@ pub async fn test_model_connection(
     let (url, body) = build_request(&base, &provider.protocol, &model.model_id, prompt)?;
     let request_body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
 
-    // Merge order: provider.headers, then per-run extra_headers (same key overwrites).
-    let mut merged_headers = provider.headers.clone();
+    // Merge order (later wins on same key):
+    //   1) protocol client defaults (Claude Code / openai-node)
+    //   2) provider.headers
+    //   3) per-run extra_headers from the UI
+    // This lets multi-provider runs mix protocols without one shared UA clobbering the other.
+    let mut merged_headers = protocol_default_headers(&provider.protocol);
+    for (k, v) in &provider.headers {
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        merged_headers.insert(key.to_string(), v.clone());
+    }
     if let Some(extra) = extra_headers {
         for (k, v) in extra {
             let key = k.trim();
@@ -138,12 +149,10 @@ pub async fn test_model_connection(
             _ => MAX_TOKENS.to_string(),
         }
     ));
-    if !merged_headers.is_empty() {
-        log.push(format!(
-            "extra/provider headers: {}",
-            merged_headers.len()
-        ));
-    }
+    log.push(format!(
+        "header merge: protocol defaults → provider.headers → run extra ({} header(s))",
+        merged_headers.len()
+    ));
     log.push(format!("POST {url}"));
     for h in &request_headers {
         log.push(format!("req header: {h}"));
@@ -273,6 +282,26 @@ pub async fn test_model_connection(
         response_headers,
         response_body: Some(response_body),
     })
+}
+
+/// Client identity defaults so gateways that check User-Agent accept the probe.
+/// Applied first; provider.headers and run extraHeaders can override.
+fn protocol_default_headers(protocol: &Protocol) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    match protocol {
+        Protocol::AnthropicMessages => {
+            m.insert("User-Agent".into(), "claude-cli/2.1.79".into());
+            m.insert("x-app".into(), "cli".into());
+            // Many Claude Code relays (e.g. anyrouter) require opt-in to the 1M
+            // context window; without this they return 400:
+            // "1m 上下文已经全量可用，请启用 1m 上下文后重试".
+            m.insert("anthropic-beta".into(), "context-1m-2025-08-07".into());
+        }
+        Protocol::OpenaiCompletions | Protocol::OpenaiResponses => {
+            m.insert("User-Agent".into(), "openai-node".into());
+        }
+    }
+    m
 }
 
 fn build_request(
