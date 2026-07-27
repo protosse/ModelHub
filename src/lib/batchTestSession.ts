@@ -23,7 +23,6 @@ export type BatchTestSession = {
   readonly protocol: string;
   readonly prompt: string;
   readonly timeoutSecs: number;
-  readonly onlyEnabled: boolean;
   readonly models: readonly Model[];
   /** Extra HTTP headers for every model in this run. */
   readonly extraHeaders: Readonly<Record<string, string>>;
@@ -107,7 +106,6 @@ export type StartBatchArgs = {
   models: readonly Model[];
   prompt: string;
   timeoutSecs: number;
-  onlyEnabled: boolean;
   extraHeaders?: Readonly<Record<string, string>>;
 };
 
@@ -115,7 +113,7 @@ export function createBatchTestSession(args: StartBatchArgs): BatchTestSession {
   if (session?.busy && session.providerId === args.providerId) {
     return session;
   }
-  const queue = args.onlyEnabled ? args.models.filter((m) => m.enabled) : [...args.models];
+  const queue = [...args.models];
   const queueIds = queue.map((m) => m.id);
   const queueSet = new Set(queueIds);
   session = {
@@ -125,7 +123,6 @@ export function createBatchTestSession(args: StartBatchArgs): BatchTestSession {
     protocol: args.protocol,
     prompt: args.prompt,
     timeoutSecs: args.timeoutSecs,
-    onlyEnabled: args.onlyEnabled,
     models: args.models,
     extraHeaders: { ...(args.extraHeaders ?? {}) },
     rows: args.models.map((m) => {

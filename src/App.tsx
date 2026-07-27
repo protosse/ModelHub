@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Layout } from "./components/Layout";
-import { AgentsPage } from "./pages/AgentsPage";
-import { ApplyPage } from "./pages/ApplyPage";
+import { AgentWorkbenchPage } from "./pages/AgentWorkbenchPage";
 import { BackupsPage } from "./pages/BackupsPage";
 import { ImportPage } from "./pages/ImportPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
@@ -9,11 +8,8 @@ import { ModelsPage } from "./pages/ModelsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import * as api from "./api/tauri";
 import type { AgentBindings, FullState, PageId } from "./types";
-import { emptyBindings, scrubBindings } from "./types";
+import { scrubBindings } from "./types";
 import { hydrateLastTestResults } from "./lib/lastTestResults";
-
-/** Stable empty draft so ApplyPage doesn't treat every parent render as a change. */
-const EMPTY_DRAFT = emptyBindings();
 
 function pagePaneClass(active: boolean): string {
   // Keep mounted + preserve each page's own scroll position.
@@ -103,7 +99,7 @@ export default function App() {
     <Layout
       page={page}
       onNavigate={navigate}
-      onApply={() => navigate("apply")}
+      onApply={() => navigate("agents")}
       toast={toast}
     >
       {/* Mount once on first visit, then keep alive across tab switches. */}
@@ -135,19 +131,12 @@ export default function App() {
       ) : null}
       {visited.has("agents") ? (
         <div className={pagePaneClass(page === "agents")}>
-          <AgentsPage
+          <AgentWorkbenchPage
             state={state}
             draft={draftBindings}
             onDraftChange={setDraftBindings}
-            onToast={showToast}
-          />
-        </div>
-      ) : null}
-      {visited.has("apply") ? (
-        <div className={pagePaneClass(page === "apply")}>
-          <ApplyPage
-            state={state}
-            draft={draftBindings ?? EMPTY_DRAFT}
+            active={page === "agents"}
+            onRefresh={refresh}
             onToast={showToast}
           />
         </div>

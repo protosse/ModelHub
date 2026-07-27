@@ -4,6 +4,7 @@ import type {
   AppConfig,
   ApplyResult,
   BackupEntry,
+  CatalogEntry,
   FullState,
   ImportItemDecision,
   ImportPreview,
@@ -50,11 +51,15 @@ export async function cloneProvider(
   return invoke("clone_provider", { id, newName, newApiKey });
 }
 
-export async function setProviderEnabled(
-  id: string,
-  enabled: boolean,
+/**
+ * Persist an agent's sync catalog. agent: "opencode" | "pi". Each entry is a
+ * provider plus an optional model subset (empty modelIds = all models).
+ */
+export async function setAgentCatalog(
+  agent: "opencode" | "pi",
+  entries: readonly CatalogEntry[],
 ): Promise<void> {
-  return invoke("set_provider_enabled", { id, enabled });
+  return invoke("set_agent_catalog", { agent, entries: [...entries] });
 }
 
 export async function addModel(input: ModelInput): Promise<Model> {

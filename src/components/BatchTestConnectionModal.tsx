@@ -51,7 +51,6 @@ function snapshot(session: BatchTestSession | null) {
     queueIds: session.queueIds,
     prompt: session.prompt,
     timeoutSecs: session.timeoutSecs,
-    onlyEnabled: session.onlyEnabled,
     providerId: session.providerId,
     cancelled: session.cancelled,
   };
@@ -94,12 +93,6 @@ export function BatchTestConnectionModal({
     : multiResume
       ? multiExisting!.timeoutSecs
       : null;
-  const resumeOnlyEnabled = batchResume
-    ? existing!.onlyEnabled
-    : multiResume
-      ? multiExisting!.onlyEnabled
-      : null;
-
   const defaultPrompt = useMemo(() => {
     if (resumePrompt != null) return resumePrompt;
     const seeded = prompts.find((p) => p.isDefault) ?? prompts[0];
@@ -116,9 +109,6 @@ export function BatchTestConnectionModal({
   const preferPromptId = useRef<string | null>(null);
   const [timeoutSecs, setTimeoutSecs] = useState(
     resumeTimeout ?? DEFAULT_TIMEOUT,
-  );
-  const [onlyEnabled, setOnlyEnabled] = useState(
-    resumeOnlyEnabled ?? false,
   );
   const [tick, setTick] = useState(0);
   /** modelId -> expanded */
@@ -338,10 +328,7 @@ export function BatchTestConnectionModal({
     return { ok, fail, pending, running, skipped };
   }, [displayRows]);
 
-  const queuePreview = useMemo(() => {
-    if (onlyEnabled) return models.filter((m) => m.enabled).length;
-    return models.length;
-  }, [models, onlyEnabled]);
+  const queuePreview = models.length;
 
   const runAll = async () => {
     if (sessionSnap?.busy) return;
@@ -358,7 +345,7 @@ export function BatchTestConnectionModal({
     const timeout = clampTimeout(timeoutSecs);
     setTimeoutSecs(timeout);
     if (queuePreview === 0) {
-      onToast(onlyEnabled ? "没有已启用的模型可测" : "没有模型可测");
+      onToast("没有模型可测");
       return;
     }
 
@@ -369,7 +356,6 @@ export function BatchTestConnectionModal({
       models,
       prompt: text,
       timeoutSecs: timeout,
-      onlyEnabled,
       extraHeaders: parseHeadersText(headersText),
     });
     setExpanded({});
@@ -418,7 +404,6 @@ export function BatchTestConnectionModal({
         <div className="text-ink-3">模型数</div>
         <div className="col-span-2 text-xs">
           共 {models.length} 个
-          {onlyEnabled ? ` · 将测 ${queuePreview} 个（仅已启用）` : ""}
           {busy ? " · 测试进行中" : ""}
         </div>
       </dl>
@@ -426,15 +411,6 @@ export function BatchTestConnectionModal({
       <div className="mb-3 rounded-lg border border-surface-3 bg-surface-1/40 p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-xs font-medium text-ink-2">提示词</div>
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
-            <input
-              type="checkbox"
-              checked={onlyEnabled}
-              disabled={busy}
-              onChange={(e) => setOnlyEnabled(e.target.checked)}
-            />
-            仅测试已启用
-          </label>
         </div>
         <label className="mb-1 block text-xs text-ink-3">已保存</label>
         <div className="mb-2 flex flex-wrap gap-2">

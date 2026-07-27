@@ -2,9 +2,10 @@ use crate::adapters;
 use crate::backup::{self, BackupEntry};
 use crate::paths::ModelHubPaths;
 use crate::store::{
-    AgentBindings, AppConfig, ApplyRequest, ApplyResult, FullState, ImportPreview, ImportRequest,
-    ImportResult, Model, ModelInput, ModelTestResult, Provider, ProviderInput, RemoteModel,
-    StoreService, TestConnectionRequest, TestConnectionResult, TestPrompt, TestPromptInput,
+    AgentBindings, AppConfig, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
+    ImportRequest, ImportResult, Model, ModelInput, ModelTestResult, Provider, ProviderInput,
+    RemoteModel, StoreService, TestConnectionRequest, TestConnectionResult, TestPrompt,
+    TestPromptInput,
 };
 
 fn svc() -> Result<(StoreService, ModelHubPaths), String> {
@@ -48,13 +49,6 @@ pub fn delete_provider(id: String) -> Result<(), String> {
 pub fn clone_provider(id: String, new_name: String, new_api_key: String) -> Result<Provider, String> {
     let (svc, _) = svc()?;
     svc.clone_provider(&id, &new_name, &new_api_key)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn set_provider_enabled(id: String, enabled: bool) -> Result<(), String> {
-    let (svc, _) = svc()?;
-    svc.set_provider_enabled(&id, enabled)
         .map_err(|e| e.to_string())
 }
 
@@ -160,6 +154,13 @@ pub async fn fetch_provider_models(provider_id: String) -> Result<Vec<RemoteMode
     let secrets = svc.load_secrets().map_err(|e| e.to_string())?;
     adapters::fetch_remote_models(&store, &secrets, &provider_id)
         .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_agent_catalog(agent: String, entries: Vec<CatalogEntry>) -> Result<(), String> {
+    let (svc, _) = svc()?;
+    svc.set_agent_catalog(&agent, &entries)
         .map_err(|e| e.to_string())
 }
 

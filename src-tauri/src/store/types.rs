@@ -106,7 +106,6 @@ pub struct Model {
     pub provider_id: String,
     pub model_id: String,
     pub display_name: String,
-    pub enabled: bool,
     #[serde(default)]
     pub capabilities: ModelCapabilities,
     pub created_at: String,
@@ -278,6 +277,67 @@ pub struct AgentBindings {
     pub pi: PiBinding,
 }
 
+/// One provider in an agent's sync catalog, with an optional model subset.
+/// `model_ids` empty = sync *all* of that provider's models (dynamic: picks up
+/// models added later). Non-empty = sync only those model row ids.
+///
+/// Back-compat: an older catalog stored bare provider-id strings. The custom
+/// `Deserialize` accepts both the legacy string form (→ empty model subset =
+/// all models) and the new object form, so existing store.json loads cleanly.
+/// Serialization always emits the new object form.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    pub provider_id: String,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for CatalogEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Legacy(String),
+            Full {
+                #[serde(rename = "providerId")]
+                provider_id: String,
+                #[serde(default, rename = "modelIds")]
+                model_ids: Vec<String>,
+            },
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Legacy(provider_id) => CatalogEntry {
+                provider_id,
+                model_ids: Vec::new(),
+            },
+            Raw::Full {
+                provider_id,
+                model_ids,
+            } => CatalogEntry {
+                provider_id,
+                model_ids,
+            },
+        })
+    }
+}
+
+/// Persistent per-agent sync catalogs: which providers (and which of their
+/// models) OpenCode / Pi write out in full. Distinct from `AgentBindings`
+/// (session draft: current default model). A `None` value means "not migrated
+/// yet" so `load_store` can seed from legacy global `Provider.enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCatalogs {
+    #[serde(default)]
+    pub opencode: Option<Vec<CatalogEntry>>,
+    #[serde(default)]
+    pub pi: Option<Vec<CatalogEntry>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Store {
@@ -285,6 +345,9 @@ pub struct Store {
     pub providers: Vec<Provider>,
     pub models: Vec<Model>,
     pub agent_bindings: AgentBindings,
+    /// Persistent per-agent sync catalogs (OpenCode / Pi full write-out set).
+    #[serde(default)]
+    pub agent_catalogs: AgentCatalogs,
     /// Connection-test prompts (reusable).
     #[serde(default = "seed_test_prompts")]
     pub test_prompts: Vec<TestPrompt>,
@@ -300,6 +363,7 @@ impl Default for Store {
             providers: Vec::new(),
             models: Vec::new(),
             agent_bindings: AgentBindings::default(),
+            agent_catalogs: AgentCatalogs::default(),
             test_prompts: seed_test_prompts(),
             model_test_results: std::collections::HashMap::new(),
         }
@@ -356,8 +420,6 @@ pub struct ModelInput {
     pub provider_id: String,
     pub model_id: String,
     pub display_name: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default)]
     pub capabilities: ModelCapabilities,
 }

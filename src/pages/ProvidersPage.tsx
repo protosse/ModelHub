@@ -272,15 +272,6 @@ export function ProvidersPage({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-medium">{p.name}</span>
-                        <span
-                          className={
-                            p.enabled
-                              ? "badge bg-ok/15 text-ok"
-                              : "badge bg-surface-3 text-ink-3"
-                          }
-                        >
-                          {p.enabled ? "同步中" : "未同步"}
-                        </span>
                       </div>
                       <ExternalLink
                         href={p.baseUrl}
@@ -658,20 +649,6 @@ function ProviderDetail({
           <button type="button" className="btn-secondary" onClick={() => setCloneOpen(true)}>
             克隆
           </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={async () => {
-              try {
-                await api.setProviderEnabled(provider.id, !provider.enabled);
-                await onRefresh();
-              } catch (e) {
-                onToast(`操作失败：${e instanceof Error ? e.message : String(e)}`);
-              }
-            }}
-          >
-            {provider.enabled ? "禁用同步" : "启用同步"}
-          </button>
           <button type="button" className="btn-danger" onClick={onRequestDelete}>
             删除
           </button>
@@ -728,8 +705,6 @@ function ProviderDetail({
                 复制
               </button>
             </div>
-            <div className="col-span-1 text-ink-3">同步到 OC/Pi</div>
-            <div className="col-span-2">{provider.enabled ? "是" : "否"}</div>
             <div className="col-span-1 text-ink-3">备注</div>
             <div className="col-span-2 whitespace-pre-wrap">{provider.notes || "—"}</div>
           </dl>
@@ -791,11 +766,10 @@ function ProviderDetail({
               <table className="w-full table-fixed text-left text-sm">
                 <colgroup>
                   <col className="w-[4%]" />
-                  <col className="w-[26%]" />
-                  <col className="w-[18%]" />
-                  <col className="w-[12%]" />
-                  <col className="w-[12%]" />
-                  <col className="w-[28%]" />
+                  <col className="w-[30%]" />
+                  <col className="w-[22%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[30%]" />
                 </colgroup>
                 <thead className="text-xs text-ink-3">
                   <tr>
@@ -804,7 +778,6 @@ function ProviderDetail({
                     </th>
                     <th className="pb-2 pr-2 font-medium">Model ID</th>
                     <th className="pb-2 pr-2 font-medium">展示名</th>
-                    <th className="pb-2 font-medium">启用</th>
                     <th className="pb-2 font-medium">最近测试</th>
                     <th className="pb-2 font-medium" />
                   </tr>
@@ -839,32 +812,6 @@ function ProviderDetail({
                         </td>
                         <td className="truncate py-2 pr-2" title={m.displayName}>
                           {m.displayName}
-                        </td>
-                        <td className="py-2">
-                          <button
-                            type="button"
-                            className={
-                              m.enabled
-                                ? "rounded-md border border-ok/40 bg-ok/15 px-2 py-1 text-xs text-ok"
-                                : "rounded-md border border-surface-3 bg-surface-0 px-2 py-1 text-xs text-ink-3"
-                            }
-                            onClick={async () => {
-                              try {
-                                await api.updateModel(m.id, {
-                                  providerId: m.providerId,
-                                  modelId: m.modelId,
-                                  displayName: m.displayName,
-                                  enabled: !m.enabled,
-                                  capabilities: m.capabilities,
-                                });
-                                await onRefresh();
-                              } catch (e) {
-                                onToast(`更新失败：${e instanceof Error ? e.message : String(e)}`);
-                              }
-                            }}
-                          >
-                            {m.enabled ? "已启用" : "已禁用"}
-                          </button>
                         </td>
                         <td className="py-2">
                           <ModelTestStatusBadge modelId={m.id} active={active} />
@@ -936,7 +883,6 @@ function ProviderDetail({
                   providerId: provider.id,
                   modelId: item.modelId,
                   displayName: item.displayName,
-                  enabled: item.enabled,
                   capabilities: { reasoning: false, vision: false },
                 })),
               );
@@ -1010,7 +956,6 @@ function ModelEditRow({
 }) {
   const [modelId, setModelId] = useState(model.modelId);
   const [displayName, setDisplayName] = useState(model.displayName);
-  const [enabled, setEnabled] = useState(model.enabled);
   const [busy, setBusy] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
@@ -1098,19 +1043,6 @@ function ModelEditRow({
         />
       </td>
       <td className="py-2 align-middle">
-        <button
-          type="button"
-          className={
-            enabled
-              ? "rounded-md border border-ok/40 bg-ok/15 px-2 py-1 text-xs text-ok"
-              : "rounded-md border border-surface-3 bg-surface-0 px-2 py-1 text-xs text-ink-3"
-          }
-          onClick={() => setEnabled((v) => !v)}
-        >
-          {enabled ? "已启用" : "已禁用"}
-        </button>
-      </td>
-      <td className="py-2 align-middle">
         <span className="text-xs text-ink-3">—</span>
       </td>
       <td className="py-2 text-right align-middle">
@@ -1129,7 +1061,6 @@ function ModelEditRow({
                   providerId: model.providerId,
                   modelId: modelId.trim(),
                   displayName: displayName.trim() || modelId.trim(),
-                  enabled,
                   capabilities: model.capabilities,
                 });
                 await onSaved();
@@ -1166,7 +1097,6 @@ function ProviderFormModal({
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [notes, setNotes] = useState(initial?.notes ?? "");
-  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1217,10 +1147,6 @@ function ProviderFormModal({
           <label className="label">备注</label>
           <textarea className="input min-h-[72px]" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </div>
-        <label className="flex items-center gap-2 text-sm text-ink-2">
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          启用同步到 OpenCode / Pi
-        </label>
         {err ? <div className="text-sm text-danger">{err}</div> : null}
       </div>
       <div className="mt-5 flex justify-end gap-2">
@@ -1248,7 +1174,6 @@ function ProviderFormModal({
                 baseUrl: baseUrl.trim(),
                 protocol,
                 apiKey: apiKey.trim(),
-                enabled,
                 notes,
                 headers: initial?.headers ?? {},
                 compat: initial?.compat ?? {},
@@ -1279,7 +1204,7 @@ function ModelFormModal({
   readonly remoteModels: readonly RemoteModel[];
   readonly onClose: () => void;
   readonly onSubmit: (
-    items: readonly { modelId: string; displayName: string; enabled: boolean }[],
+    items: readonly { modelId: string; displayName: string }[],
   ) => Promise<void>;
 }) {
   const available = remoteModels.filter((m) => !existingIds.has(m.id));
@@ -1289,7 +1214,6 @@ function ModelFormModal({
   const [pickQuery, setPickQuery] = useState("");
   const [modelId, setModelId] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   void providerId;
@@ -1402,10 +1326,6 @@ function ModelFormModal({
               )}
             </>
           )}
-          <label className="flex items-center gap-2 text-sm text-ink-2">
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            启用
-          </label>
         </div>
       ) : (
         <div className="space-y-3">
@@ -1422,10 +1342,6 @@ function ModelFormModal({
               placeholder="默认同 Model ID"
             />
           </div>
-          <label className="flex items-center gap-2 text-sm text-ink-2">
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            启用
-          </label>
         </div>
       )}
 
@@ -1467,7 +1383,6 @@ function ModelFormModal({
                   return {
                     modelId: id,
                     displayName: meta?.name || id,
-                    enabled,
                   };
                 });
                 await onSubmit(items);
@@ -1477,7 +1392,6 @@ function ModelFormModal({
                   {
                     modelId: id,
                     displayName: displayName.trim() || id,
-                    enabled,
                   },
                 ]);
               }

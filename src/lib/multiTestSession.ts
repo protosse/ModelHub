@@ -28,7 +28,6 @@ export type MultiTestSession = {
   readonly providerIds: readonly string[];
   readonly prompt: string;
   readonly timeoutSecs: number;
-  readonly onlyEnabled: boolean;
   readonly concurrency: number;
   /** Extra HTTP headers applied to every request in this run. */
   readonly extraHeaders: Readonly<Record<string, string>>;
@@ -102,7 +101,6 @@ export type StartMultiArgs = {
   modelsByProvider: ReadonlyMap<string, readonly Model[]>;
   prompt: string;
   timeoutSecs: number;
-  onlyEnabled: boolean;
   concurrency?: number;
   extraHeaders?: Readonly<Record<string, string>>;
 };
@@ -118,7 +116,6 @@ export function createMultiTestSession(args: StartMultiArgs): MultiTestSession {
   for (const p of args.providers) {
     const models = args.modelsByProvider.get(p.id) ?? [];
     for (const m of models) {
-      const inQueue = args.onlyEnabled ? m.enabled : true;
       const last = getLastTestResult(m.id);
       rows.push({
         modelId: m.id,
@@ -126,7 +123,7 @@ export function createMultiTestSession(args: StartMultiArgs): MultiTestSession {
         providerName: p.name,
         modelApiId: m.modelId,
         displayName: m.displayName,
-        status: inQueue ? "pending" : "skipped",
+        status: "pending",
         result: last?.result ?? null,
         error: null,
         logs: last?.logs?.length ? [...last.logs] : [],
@@ -139,7 +136,6 @@ export function createMultiTestSession(args: StartMultiArgs): MultiTestSession {
     providerIds,
     prompt: args.prompt,
     timeoutSecs: args.timeoutSecs,
-    onlyEnabled: args.onlyEnabled,
     concurrency: Math.max(1, Math.min(8, args.concurrency ?? DEFAULT_CONCURRENCY)),
     extraHeaders: { ...(args.extraHeaders ?? {}) },
     rows,

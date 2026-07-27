@@ -29,7 +29,6 @@ export type Model = {
   readonly providerId: string;
   readonly modelId: string;
   readonly displayName: string;
-  readonly enabled: boolean;
   readonly capabilities: ModelCapabilities;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -99,11 +98,33 @@ export type TestConnectionResult = {
   readonly responseBody: string | null;
 };
 
+/**
+ * One provider in an agent's sync catalog, with an optional model subset.
+ * `modelIds` empty = sync ALL of that provider's models (dynamic: picks up
+ * models added later). Non-empty = sync only those model row ids.
+ */
+export type CatalogEntry = {
+  readonly providerId: string;
+  readonly modelIds: readonly string[];
+};
+
+/**
+ * Persistent per-agent sync catalogs: which providers (and which of their
+ * models) OpenCode / Pi write out in full. Distinct from AgentBindings
+ * (session-draft current default model). A null value means "not migrated
+ * yet" (backend seeds from legacy enabled).
+ */
+export type AgentCatalogs = {
+  readonly opencode: readonly CatalogEntry[] | null;
+  readonly pi: readonly CatalogEntry[] | null;
+};
+
 export type Store = {
   readonly version: number;
   readonly providers: readonly Provider[];
   readonly models: readonly Model[];
   readonly agentBindings: AgentBindings;
+  readonly agentCatalogs: AgentCatalogs;
   readonly testPrompts: readonly TestPrompt[];
   /** modelId -> last test result */
   readonly modelTestResults: Readonly<Record<string, ModelTestResult>>;
@@ -158,7 +179,6 @@ export type ModelInput = {
   readonly providerId: string;
   readonly modelId: string;
   readonly displayName: string;
-  readonly enabled?: boolean;
   readonly capabilities?: ModelCapabilities;
 };
 
@@ -228,7 +248,6 @@ export type PageId =
   | "providers"
   | "models"
   | "agents"
-  | "apply"
   | "import"
   | "backups"
   | "settings";

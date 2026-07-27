@@ -5,8 +5,8 @@ use super::backup_before_write;
 use super::util::{ensure_object, read_json_value, write_json_value};
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
-    find_provider, resolve_provider_write_key, resolve_upstream_model_id, AppConfig,
-    ApplyAgentResult, Protocol, Secrets, Store, StoreService,
+    agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
+    AppConfig, ApplyAgentResult, Protocol, Secrets, Store, StoreService,
 };
 
 pub fn apply(
@@ -32,24 +32,20 @@ pub fn apply(
         .or_insert_with(|| Value::Object(Map::new()));
     let providers = ensure_object(providers_val)?;
 
-    // remove managed
-    let managed: Vec<String> = providers
-        .iter()
-        .filter_map(|(k, v)| {
-            v.get("_modelhub")
-                .and_then(|m| m.get("managed"))
-                .and_then(|b| b.as_bool())
-                .filter(|b| *b)
-                .map(|_| k.clone())
-        })
-        .collect();
-    for k in managed {
-        providers.remove(&k);
-    }
+    // Full overwrite: ModelHub owns the provider directory, so clear every block
+    // (managed or not) and rewrite only the sync catalog. Hand-added blocks are
+    // intentionally dropped — everything lives in ModelHub now.
+    providers.clear();
 
-    let enabled = svc.enabled_providers_with_models(store);
+    let enabled = svc.catalog_providers_with_models(store, "pi");
+    // Unique key per provider (names are globally unique); same map used by
+    // preview. Prevents two providers sharing a base_url (diff protocol) from
+    // colliding onto one key and overwriting each other.
+    let write_keys = assign_catalog_write_keys(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+    );
     for (provider, models) in &enabled {
-        let slug = resolve_provider_write_key(provider, providers);
+        let slug = write_keys.get(&provider.id).cloned().unwrap_or_default();
         let api_key = secrets
             .secrets
             .get(&provider.secret_ref)
@@ -74,7 +70,10 @@ pub fn apply(
             .collect();
 
         let mut entry = Map::new();
-        entry.insert("baseUrl".into(), Value::String(provider.base_url.clone()));
+        entry.insert(
+            "baseUrl".into(),
+            Value::String(agent_write_base_url(&provider.base_url, &provider.protocol)),
+        );
         entry.insert("api".into(), Value::String(api.into()));
         if !api_key.is_empty() {
             entry.insert("apiKey".into(), Value::String(api_key));
@@ -84,13 +83,16 @@ pub fn apply(
         {
             entry.insert("authHeader".into(), Value::Bool(true));
         }
-        if !provider.headers.is_empty() {
-            let mut headers = Map::new();
-            for (k, v) in &provider.headers {
-                headers.insert(k.clone(), Value::String(v.clone()));
-            }
-            entry.insert("headers".into(), Value::Object(headers));
+        // Default pi client UA (some relays gate on it); provider.headers may override.
+        let mut headers = Map::new();
+        headers.insert(
+            "User-Agent".into(),
+            Value::String("pi-coding-agent".into()),
+        );
+        for (k, v) in &provider.headers {
+            headers.insert(k.clone(), Value::String(v.clone()));
         }
+        entry.insert("headers".into(), Value::Object(headers));
         if !provider.compat.is_empty() {
             entry.insert(
                 "compat".into(),
@@ -98,6 +100,13 @@ pub fn apply(
             );
         }
         entry.insert("models".into(), Value::Array(model_arr));
+        entry.insert(
+            "_modelhub".into(),
+            json!({
+                "managed": true,
+                "providerId": provider.id,
+            }),
+        );
 
         providers.insert(slug, Value::Object(entry));
     }
@@ -114,12 +123,7 @@ pub fn apply(
             find_provider(store, pid),
             resolve_upstream_model_id(store, mid),
         ) {
-            let providers_map = root
-                .get("providers")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default();
-            let slug = resolve_provider_write_key(p, &providers_map);
+            let slug = write_keys.get(&p.id).cloned().unwrap_or_default();
             settings_obj.insert("defaultProvider".into(), Value::String(slug));
             settings_obj.insert("defaultModel".into(), Value::String(upstream));
         }
@@ -129,7 +133,7 @@ pub fn apply(
     Ok(ApplyAgentResult {
         agent: "pi".into(),
         ok: true,
-        message: format!("已同步 {} 个 enabled Provider 到 Pi", enabled.len()),
+        message: format!("已同步 {} 个同步目录 Provider 到 Pi", enabled.len()),
         files: vec![
             models_file.display().to_string(),
             settings_file.display().to_string(),

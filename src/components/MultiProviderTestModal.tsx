@@ -96,9 +96,6 @@ export function MultiProviderTestModal({
   const [timeoutSecs, setTimeoutSecs] = useState(
     resumeSame && existing ? existing.timeoutSecs : DEFAULT_TIMEOUT,
   );
-  const [onlyEnabled, setOnlyEnabled] = useState(
-    resumeSame && existing ? existing.onlyEnabled : false,
-  );
   const [tick, setTick] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [providerFilter, setProviderFilter] = useState<Record<string, boolean>>({});
@@ -364,13 +361,10 @@ export function MultiProviderTestModal({
   const queuePreview = useMemo(() => {
     let n = 0;
     for (const p of providers) {
-      for (const m of models.filter((x) => x.providerId === p.id)) {
-        if (onlyEnabled && !m.enabled) continue;
-        n += 1;
-      }
+      n += models.filter((x) => x.providerId === p.id).length;
     }
     return n;
-  }, [providers, models, onlyEnabled]);
+  }, [providers, models]);
 
   const summary = useMemo(() => {
     let ok = 0;
@@ -407,7 +401,7 @@ export function MultiProviderTestModal({
     const timeout = clampTimeout(timeoutSecs);
     setTimeoutSecs(timeout);
     if (queuePreview === 0) {
-      onToast(onlyEnabled ? "没有已启用的模型可测" : "没有模型可测");
+      onToast("没有模型可测");
       return;
     }
 
@@ -424,7 +418,6 @@ export function MultiProviderTestModal({
       modelsByProvider,
       prompt: text,
       timeoutSecs: timeout,
-      onlyEnabled,
       concurrency: CONCURRENCY,
       extraHeaders: parseHeadersText(headersText),
     });
@@ -465,7 +458,6 @@ export function MultiProviderTestModal({
         <div className="text-ink-3">预计模型</div>
         <div className="col-span-2 text-xs">
           {busy ? displayRows.length : queuePreview} 个
-          {!busy && onlyEnabled ? "（仅已启用）" : ""}
         </div>
         <div className="text-ink-3">并发</div>
         <div className="col-span-2 text-xs">
@@ -476,15 +468,6 @@ export function MultiProviderTestModal({
       <div className="mb-3 rounded-lg border border-surface-3 bg-surface-1/40 p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-xs font-medium text-ink-2">提示词</div>
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
-            <input
-              type="checkbox"
-              checked={onlyEnabled}
-              disabled={busy}
-              onChange={(e) => setOnlyEnabled(e.target.checked)}
-            />
-            仅测试已启用
-          </label>
         </div>
         <label className="mb-1 block text-xs text-ink-3">已保存</label>
         <div className="mb-2 flex flex-wrap gap-2">

@@ -40,7 +40,8 @@ impl StoreService {
         self.ensure_dirs()?;
         let path = self.paths.store_file();
         let mut store: Store = read_json_or_default(&path)?;
-        let changed = ensure_default_test_prompt(&mut store);
+        let mut changed = ensure_default_test_prompt(&mut store);
+        changed |= migrate_agent_catalogs(&mut store);
         // Persist seed/migration for older store.json files.
         if path.exists() && changed {
             let _ = self.save_store(&store);
@@ -138,6 +139,21 @@ impl StoreService {
             },
         );
         store.providers.push(provider.clone());
+        // New providers default into both OC/Pi sync catalogs (empty modelIds =
+        // all models), matching the pre-`enabled` behavior of "new = synced".
+        // Only when the catalog is already migrated (Some); None is seeded later.
+        if let Some(list) = store.agent_catalogs.opencode.as_mut() {
+            list.push(CatalogEntry {
+                provider_id: provider.id.clone(),
+                model_ids: Vec::new(),
+            });
+        }
+        if let Some(list) = store.agent_catalogs.pi.as_mut() {
+            list.push(CatalogEntry {
+                provider_id: provider.id.clone(),
+                model_ids: Vec::new(),
+            });
+        }
         self.save_secrets(&secrets)?;
         self.save_store(&store)?;
         Ok(provider)
@@ -206,6 +222,7 @@ impl StoreService {
             store.model_test_results.remove(&mid);
         }
         clear_bindings_for_provider(&mut store.agent_bindings, id);
+        clear_catalogs_for_provider(&mut store.agent_catalogs, id);
         self.save_secrets(&secrets)?;
         self.save_store(&store)?;
         Ok(())
@@ -245,7 +262,6 @@ impl StoreService {
                 provider_id: created.id.clone(),
                 model_id: m.model_id,
                 display_name: m.display_name,
-                enabled: m.enabled,
                 capabilities: m.capabilities,
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -253,19 +269,6 @@ impl StoreService {
         }
         self.save_store(&store)?;
         Ok(created)
-    }
-
-    pub fn set_provider_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        let mut store = self.load_store()?;
-        let provider = store
-            .providers
-            .iter_mut()
-            .find(|p| p.id == id)
-            .context("provider not found")?;
-        provider.enabled = enabled;
-        provider.updated_at = now_iso();
-        self.save_store(&store)?;
-        Ok(())
     }
 
     pub fn add_model(&self, input: ModelInput) -> Result<Model> {
@@ -284,7 +287,6 @@ impl StoreService {
             provider_id: input.provider_id,
             model_id: input.model_id,
             display_name: input.display_name,
-            enabled: input.enabled,
             capabilities: input.capabilities,
             created_at: now.clone(),
             updated_at: now,
@@ -321,7 +323,6 @@ impl StoreService {
                 provider_id: input.provider_id,
                 model_id: input.model_id,
                 display_name: input.display_name,
-                enabled: input.enabled,
                 capabilities: input.capabilities,
                 created_at: now.clone(),
                 updated_at: now.clone(),
@@ -353,7 +354,6 @@ impl StoreService {
         model.provider_id = input.provider_id;
         model.model_id = input.model_id;
         model.display_name = input.display_name;
-        model.enabled = input.enabled;
         model.capabilities = input.capabilities;
         model.updated_at = now_iso();
         let out = model.clone();
@@ -420,24 +420,78 @@ impl StoreService {
         self.get_api_key(&provider.secret_ref)
     }
 
-    pub fn enabled_providers_with_models(
+    /// Providers (with the models an agent syncs) taken from its persistent
+    /// catalog. Order follows the catalog list; unknown provider ids are skipped.
+    /// An entry's empty `model_ids` means "all of that provider's models"
+    /// (dynamic: includes models added later); a non-empty subset is filtered to
+    /// those model row ids (dangling ids skipped). `agent` is "opencode" | "pi".
+    pub fn catalog_providers_with_models(
         &self,
         store: &Store,
+        agent: &str,
     ) -> Vec<(Provider, Vec<Model>)> {
-        store
-            .providers
+        let entries = match agent {
+            "opencode" => store.agent_catalogs.opencode.as_deref(),
+            "pi" => store.agent_catalogs.pi.as_deref(),
+            _ => None,
+        }
+        .unwrap_or(&[]);
+        entries
             .iter()
-            .filter(|p| p.enabled)
-            .map(|p| {
+            .filter_map(|entry| {
+                let provider = store.providers.iter().find(|p| p.id == entry.provider_id)?;
+                let subset: std::collections::HashSet<&str> =
+                    entry.model_ids.iter().map(|s| s.as_str()).collect();
                 let models = store
                     .models
                     .iter()
-                    .filter(|m| m.provider_id == p.id && m.enabled)
+                    .filter(|m| m.provider_id == provider.id)
+                    .filter(|m| subset.is_empty() || subset.contains(m.id.as_str()))
                     .cloned()
                     .collect();
-                (p.clone(), models)
+                Some((provider.clone(), models))
             })
             .collect()
+    }
+
+    /// Persist an agent's sync catalog. Unknown/dangling provider ids are
+    /// dropped, order preserved, duplicate providers removed (first wins). Each
+    /// entry's `model_ids` is scrubbed of ids not belonging to that provider;
+    /// empty stays empty (= all models). `agent` must be "opencode" | "pi".
+    pub fn set_agent_catalog(&self, agent: &str, entries: &[CatalogEntry]) -> Result<()> {
+        let mut store = self.load_store()?;
+        let known: std::collections::HashSet<&str> =
+            store.providers.iter().map(|p| p.id.as_str()).collect();
+        let mut seen = std::collections::HashSet::new();
+        let cleaned: Vec<CatalogEntry> = entries
+            .iter()
+            .filter(|e| known.contains(e.provider_id.as_str()))
+            .filter(|e| seen.insert(e.provider_id.clone()))
+            .map(|e| {
+                let valid: Vec<String> = e
+                    .model_ids
+                    .iter()
+                    .filter(|mid| {
+                        store
+                            .models
+                            .iter()
+                            .any(|m| &m.id == *mid && m.provider_id == e.provider_id)
+                    })
+                    .cloned()
+                    .collect();
+                CatalogEntry {
+                    provider_id: e.provider_id.clone(),
+                    model_ids: valid,
+                }
+            })
+            .collect();
+        match agent {
+            "opencode" => store.agent_catalogs.opencode = Some(cleaned),
+            "pi" => store.agent_catalogs.pi = Some(cleaned),
+            other => anyhow::bail!("unknown catalog agent: {other}"),
+        }
+        self.save_store(&store)?;
+        Ok(())
     }
 
     pub fn list_test_prompts(&self) -> Result<Vec<TestPrompt>> {
@@ -611,6 +665,44 @@ fn ensure_default_test_prompt(store: &mut Store) -> bool {
     changed
 }
 
+/// Seed per-agent catalogs from the legacy global `Provider.enabled` on first
+/// load. `None` means "never migrated" → fill both agents from enabled providers
+/// so behavior matches the pre-catalog build. Once `Some`, we never re-seed (an
+/// empty list is a deliberate user choice, not a missing migration).
+fn migrate_agent_catalogs(store: &mut Store) -> bool {
+    let needs_opencode = store.agent_catalogs.opencode.is_none();
+    let needs_pi = store.agent_catalogs.pi.is_none();
+    if !needs_opencode && !needs_pi {
+        return false;
+    }
+    // Legacy enabled providers seed with an empty model subset = all models.
+    let enabled: Vec<CatalogEntry> = store
+        .providers
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| CatalogEntry {
+            provider_id: p.id.clone(),
+            model_ids: Vec::new(),
+        })
+        .collect();
+    if needs_opencode {
+        store.agent_catalogs.opencode = Some(enabled.clone());
+    }
+    if needs_pi {
+        store.agent_catalogs.pi = Some(enabled);
+    }
+    true
+}
+
+fn clear_catalogs_for_provider(c: &mut AgentCatalogs, provider_id: &str) {
+    if let Some(list) = c.opencode.as_mut() {
+        list.retain(|e| e.provider_id != provider_id);
+    }
+    if let Some(list) = c.pi.as_mut() {
+        list.retain(|e| e.provider_id != provider_id);
+    }
+}
+
 fn clear_bindings_for_provider(b: &mut AgentBindings, provider_id: &str) {
     if b.claude.provider_id.as_deref() == Some(provider_id) {
         b.claude.provider_id = None;
@@ -673,6 +765,26 @@ pub fn mask_key(key: &str) -> String {
 
 pub fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+/// Base URL to write into an agent config, protocol-aware. OpenAI-style
+/// endpoints (completions / responses) expect a `/v1` root — mirror the
+/// connectivity-test behavior (`api_root`) and native gateway configs, which
+/// all carry `/v1`. Anthropic gateways are used bare (no `/v1`), matching their
+/// on-disk native configs. Keeps apply consistent with what testing actually
+/// hits, so a model that tests OK also works after apply.
+pub fn agent_write_base_url(base: &str, protocol: &Protocol) -> String {
+    let b = normalize_base_url(base);
+    match protocol {
+        Protocol::OpenaiCompletions | Protocol::OpenaiResponses => {
+            if b.ends_with("/v1") {
+                b
+            } else {
+                format!("{b}/v1")
+            }
+        }
+        Protocol::AnthropicMessages => b,
+    }
 }
 
 pub fn key_fingerprint(key: &str) -> String {
@@ -743,24 +855,27 @@ pub fn provider_slug(provider: &Provider) -> String {
     }
 }
 
-pub fn resolve_provider_write_key(
-    provider: &Provider,
-    existing: &serde_json::Map<String, serde_json::Value>,
-) -> String {
-    let want = normalize_base_url(&provider.base_url);
-    for (key, val) in existing {
-        let base = val
-            .pointer("/options/baseURL")
-            .or_else(|| val.pointer("/options/baseUrl"))
-            .or_else(|| val.get("baseUrl"))
-            .or_else(|| val.get("baseURL"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !base.is_empty() && normalize_base_url(base) == want {
-            return key.clone();
+/// Assign a unique write-out key per provider for a full-overwrite agent
+/// directory (OpenCode / Pi). Keys derive from the provider name slug (names are
+/// globally unique) and are de-duplicated within the set by appending `-2`, `-3`
+/// so two providers sharing a base_url but differing by protocol (e.g.
+/// `jianzhile` responses + `jianzhile-cc` anthropic) never collide. Returns a
+/// map provider.id -> key. Both apply and preview must use this same map.
+pub fn assign_catalog_write_keys(providers: &[Provider]) -> HashMap<String, String> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: HashMap<String, String> = HashMap::new();
+    for p in providers {
+        let base = provider_slug(p);
+        let mut key = base.clone();
+        let mut n = 2;
+        while used.contains(&key) {
+            key = format!("{base}-{n}");
+            n += 1;
         }
+        used.insert(key.clone());
+        out.insert(p.id.clone(), key);
     }
-    provider_slug(provider)
+    out
 }
 
 /// Same endpoint = same provider across agents (ignore key presence differences)

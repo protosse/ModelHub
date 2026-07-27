@@ -631,7 +631,6 @@ pub fn import_from_agents(
                 provider_id: target_id.clone(),
                 model_id: mid.clone(),
                 display_name: display.clone(),
-                enabled: true,
                 capabilities: ModelCapabilities {
                     reasoning: *reasoning,
                     vision: false,

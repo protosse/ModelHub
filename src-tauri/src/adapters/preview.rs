@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::util::read_json_value;
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
-    find_provider, resolve_provider_write_key, resolve_upstream_model_id, AgentMode, AppConfig,
+    assign_catalog_write_keys, find_provider, resolve_upstream_model_id, AgentMode, AppConfig,
     Secrets, Store, StoreService,
 };
 use fs_err as fs;
@@ -295,61 +295,95 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let enabled = svc.enabled_providers_with_models(store);
+    let enabled = svc.catalog_providers_with_models(store, "opencode");
     let existing = current
         .get("provider")
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
+    // Same key map apply uses (name slug, de-duped) so preview matches disk.
+    let key_map = assign_catalog_write_keys(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+    );
     let active = store
         .agent_bindings
         .opencode
         .provider_id
         .as_deref()
-        .and_then(|pid| find_provider(store, pid))
-        .zip(
+        .and_then(|pid| key_map.get(pid).cloned().zip(
             store
                 .agent_bindings
                 .opencode
                 .model_id
                 .as_deref()
                 .and_then(|mid| resolve_upstream_model_id(store, mid)),
-        )
-        .map(|(p, m)| {
-            let key = resolve_provider_write_key(p, &existing);
-            format!("{key}/{m}")
-        })
+        ))
+        .map(|(key, m)| format!("{key}/{m}"))
         .unwrap_or_default();
 
     let mut lines = vec![
         DiffLine {
             kind: "same".into(),
             text: format!(
-                "enabled providers to sync: {} (file currently has {cur_provider_count} provider entries)",
+                "同步目录：{} 个 Provider（文件现有 {cur_provider_count} 个 provider 条目）",
                 enabled.len()
             ),
         },
         chg("model", &cur_model, &active),
     ];
+    let mut write_keys = std::collections::HashSet::new();
     for (p, models) in &enabled {
-        let key = resolve_provider_write_key(p, &existing);
+        let key = key_map.get(&p.id).cloned().unwrap_or_default();
+        write_keys.insert(key.clone());
         lines.push(DiffLine {
             kind: "same".into(),
             text: format!(
-                "provider key `{key}` ← {} ({}) models={}",
+                "provider key `{key}` ← {} ({}) 模型 {}",
                 p.name,
                 p.base_url,
                 models.len()
             ),
         });
+        // Disk model ids for this provider block: `provider[key].models` keys.
+        let disk_ids: std::collections::HashSet<String> = existing
+            .get(&key)
+            .and_then(|v| v.get("models"))
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        push_model_diff_lines(&mut lines, &disk_ids, models);
     }
+    push_orphan_block_lines(&mut lines, &existing, &write_keys);
 
     Ok(AgentDiff {
         agent: "opencode".into(),
         file: file.display().to_string(),
         lines,
-        note: "会合并写入 enabled providers；mcp/plugin 不动".into(),
+        note: "完全覆盖 provider 配置：只保留同步目录的 Provider，其余全部删除；mcp/plugin 等其它字段不动".into(),
     })
+}
+
+/// (removed: superseded by push_model_diff_lines)
+#[allow(dead_code)]
+fn _append_model_diff_removed(lines: &mut Vec<DiffLine>, disk_ids: &[String], new_ids: &[String]) {
+    let disk: std::collections::HashSet<&str> = disk_ids.iter().map(|s| s.as_str()).collect();
+    let next: std::collections::HashSet<&str> = new_ids.iter().map(|s| s.as_str()).collect();
+    for id in new_ids {
+        if !disk.contains(id.as_str()) {
+            lines.push(DiffLine {
+                kind: "add".into(),
+                text: format!("  + 模型 {id}"),
+            });
+        }
+    }
+    for id in disk_ids {
+        if !next.contains(id.as_str()) {
+            lines.push(DiffLine {
+                kind: "remove".into(),
+                text: format!("  - 模型 {id}"),
+            });
+        }
+    }
 }
 
 fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<AgentDiff> {
@@ -371,7 +405,7 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
         .unwrap_or("")
         .to_string();
 
-    let enabled = svc.enabled_providers_with_models(store);
+    let enabled = svc.catalog_providers_with_models(store, "pi");
     let existing = if models_file.exists() {
         read_json_value(&models_file)
             .ok()
@@ -384,42 +418,66 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
     } else {
         Default::default()
     };
-    let new_p = store
-        .agent_bindings
-        .pi
-        .provider_id
-        .as_deref()
-        .and_then(|id| find_provider(store, id))
-        .map(|p| resolve_provider_write_key(p, &existing))
-        .unwrap_or_default();
-    let new_m = store
-        .agent_bindings
-        .pi
-        .model_id
-        .as_deref()
-        .and_then(|id| resolve_upstream_model_id(store, id))
-        .unwrap_or_default();
+    // Same key map apply uses (name slug, de-duped) so preview matches disk.
+    let key_map = assign_catalog_write_keys(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+    );
+    // Apply only writes defaultProvider/defaultModel when BOTH are set in the
+    // draft; otherwise it leaves the disk values untouched. Mirror that here so
+    // an unset binding shows "unchanged" instead of a phantom "→ —" change.
+    let (new_p, new_m) = match (
+        store
+            .agent_bindings
+            .pi
+            .provider_id
+            .as_deref()
+            .and_then(|id| key_map.get(id).cloned()),
+        store
+            .agent_bindings
+            .pi
+            .model_id
+            .as_deref()
+            .and_then(|id| resolve_upstream_model_id(store, id)),
+    ) {
+        (Some(p), Some(m)) => (p, m),
+        _ => (cur_p.clone(), cur_m.clone()),
+    };
 
     let mut lines = vec![
         chg("defaultProvider", &cur_p, &new_p),
         chg("defaultModel", &cur_m, &new_m),
         DiffLine {
             kind: "same".into(),
-            text: format!("models.json: sync {} enabled providers", enabled.len()),
+            text: format!("models.json: 同步 {} 个 Provider", enabled.len()),
         },
     ];
+    let mut write_keys = std::collections::HashSet::new();
     for (p, models) in &enabled {
-        let key = resolve_provider_write_key(p, &existing);
+        let key = key_map.get(&p.id).cloned().unwrap_or_default();
+        write_keys.insert(key.clone());
         lines.push(DiffLine {
             kind: "same".into(),
             text: format!(
-                "provider key `{key}` ← {} ({}) models={}",
+                "provider key `{key}` ← {} ({}) 模型 {}",
                 p.name,
                 p.base_url,
                 models.len()
             ),
         });
+        // Model-level diff: disk block stores models as an array of {id, ...}.
+        let disk_ids: std::collections::HashSet<String> = existing
+            .get(&key)
+            .and_then(|v| v.get("models"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        push_model_diff_lines(&mut lines, &disk_ids, models);
     }
+    push_orphan_block_lines(&mut lines, &existing, &write_keys);
 
     Ok(AgentDiff {
         agent: "pi".into(),
@@ -429,8 +487,61 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
             settings_file.display()
         ),
         lines,
-        note: "会合并写入 enabled providers；defaultProvider 优先复用磁盘已有 key".into(),
+        note: "完全覆盖 providers：只保留同步目录的 Provider，其余全部删除；defaultProvider 优先复用磁盘已有 key".into(),
     })
+}
+
+/// Append per-model add/remove lines comparing the disk model-id set against the
+/// models about to be written. `disk_ids` are upstream model ids currently on
+/// disk for this provider block; `writing` are the store models we'll write.
+fn push_model_diff_lines(
+    lines: &mut Vec<DiffLine>,
+    disk_ids: &std::collections::HashSet<String>,
+    writing: &[crate::store::Model],
+) {
+    let write_ids: std::collections::HashSet<&str> =
+        writing.iter().map(|m| m.model_id.as_str()).collect();
+    for m in writing {
+        if !disk_ids.contains(&m.model_id) {
+            lines.push(DiffLine {
+                kind: "add".into(),
+                text: format!("  + 模型 {}", m.model_id),
+            });
+        }
+    }
+    let mut removed: Vec<&String> = disk_ids
+        .iter()
+        .filter(|id| !write_ids.contains(id.as_str()))
+        .collect();
+    removed.sort();
+    for id in removed {
+        lines.push(DiffLine {
+            kind: "same".into(),
+            text: format!("  · 模型 {id}（磁盘上有，本次不再同步）"),
+        });
+    }
+}
+
+/// Report disk provider blocks that ModelHub will NOT write this round (not in
+/// the sync catalog, so their key isn't in `writing_keys`). Apply fully
+/// overwrites the OC/Pi provider map — every orphan block is deleted, whether
+/// ModelHub-managed or hand-added — so surface them all as removals.
+fn push_orphan_block_lines(
+    lines: &mut Vec<DiffLine>,
+    existing: &serde_json::Map<String, Value>,
+    writing_keys: &std::collections::HashSet<String>,
+) {
+    let mut orphans: Vec<&String> = existing
+        .keys()
+        .filter(|k| !writing_keys.contains(k.as_str()))
+        .collect();
+    orphans.sort();
+    for key in orphans {
+        lines.push(DiffLine {
+            kind: "remove".into(),
+            text: format!("- provider `{key}`（不在同步目录 → 将删除）"),
+        });
+    }
 }
 
 fn chg(field: &str, old: &str, new: &str) -> DiffLine {

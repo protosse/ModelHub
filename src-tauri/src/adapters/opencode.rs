@@ -5,7 +5,7 @@ use super::backup_before_write;
 use super::util::{ensure_object, read_json_value, write_json_value};
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
-    find_provider, resolve_provider_write_key, resolve_upstream_model_id, AppConfig,
+    agent_write_base_url, assign_catalog_write_keys, resolve_upstream_model_id, AppConfig,
     ApplyAgentResult, Protocol, Secrets, Store, StoreService,
 };
 
@@ -32,22 +32,18 @@ pub fn apply(
         .or_insert_with(|| Value::Object(Map::new()));
     let provider_obj = ensure_object(provider_map)?;
 
-    // Remove previously managed keys
-    let managed_keys: Vec<String> = provider_obj
-        .iter()
-        .filter_map(|(k, v)| {
-            v.get("_modelhub")
-                .and_then(|m| m.get("managed"))
-                .and_then(|b| b.as_bool())
-                .filter(|b| *b)
-                .map(|_| k.clone())
-        })
-        .collect();
-    for k in managed_keys {
-        provider_obj.remove(&k);
-    }
+    // Full overwrite: ModelHub owns the entire `provider` map. Clear all blocks
+    // (managed or not) and rewrite only the sync catalog. `mcp` / `plugin` and
+    // other top-level keys are untouched.
+    provider_obj.clear();
 
-    let enabled = svc.enabled_providers_with_models(store);
+    let enabled = svc.catalog_providers_with_models(store, "opencode");
+    // Unique key per provider (names are globally unique); same map used by
+    // preview. Prevents two providers sharing a base_url (diff protocol) from
+    // colliding onto one key and overwriting each other.
+    let write_keys = assign_catalog_write_keys(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+    );
     let mut auth = if auth_file.exists() {
         read_json_value(&auth_file)?
     } else {
@@ -56,7 +52,7 @@ pub fn apply(
     let auth_obj = ensure_object(&mut auth)?;
 
     for (provider, models) in &enabled {
-        let slug = resolve_provider_write_key(provider, provider_obj);
+        let slug = write_keys.get(&provider.id).cloned().unwrap_or_default();
         let api_key = secrets
             .secrets
             .get(&provider.secret_ref)
@@ -80,7 +76,10 @@ pub fn apply(
         }
 
         let mut options = Map::new();
-        options.insert("baseURL".into(), Value::String(provider.base_url.clone()));
+        options.insert(
+            "baseURL".into(),
+            Value::String(agent_write_base_url(&provider.base_url, &provider.protocol)),
+        );
         if !provider.headers.is_empty() {
             let mut headers = Map::new();
             for (k, v) in &provider.headers {
@@ -112,16 +111,14 @@ pub fn apply(
         }
     }
 
-    let provider_keys = provider_obj.clone();
     if let (Some(pid), Some(mid)) = (
         store.agent_bindings.opencode.provider_id.as_deref(),
         store.agent_bindings.opencode.model_id.as_deref(),
     ) {
-        if let (Some(p), Some(upstream)) = (
-            find_provider(store, pid),
+        if let (Some(slug), Some(upstream)) = (
+            write_keys.get(pid),
             resolve_upstream_model_id(store, mid),
         ) {
-            let slug = resolve_provider_write_key(p, &provider_keys);
             obj.insert(
                 "model".into(),
                 Value::String(format!("{slug}/{upstream}")),
@@ -131,8 +128,7 @@ pub fn apply(
 
     if let Some(small_id) = store.agent_bindings.opencode.small_model_id.as_deref() {
         if let Some(m) = store.models.iter().find(|x| x.id == small_id) {
-            if let Some(p) = find_provider(store, &m.provider_id) {
-                let slug = resolve_provider_write_key(p, &provider_keys);
+            if let Some(slug) = write_keys.get(&m.provider_id) {
                 obj.insert(
                     "small_model".into(),
                     Value::String(format!("{slug}/{}", m.model_id)),
@@ -148,7 +144,7 @@ pub fn apply(
         agent: "opencode".into(),
         ok: true,
         message: format!(
-            "已同步 {} 个 enabled Provider 到 OpenCode",
+            "已同步 {} 个同步目录 Provider 到 OpenCode",
             enabled.len()
         ),
         files: vec![
