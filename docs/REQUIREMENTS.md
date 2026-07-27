@@ -348,7 +348,7 @@ ModelHub 库（持久）
 | Claude | env + model；**不写** `_modelhub` |
 | Codex | `modelhub` 槽 + `experimental_bearer_token`；**不改** auth.json |
 | OpenCode | **完全覆盖** `provider` 目录：清空所有旧块，只写 **catalog(opencode)** + 默认 model；`mcp`/`plugin` 等其它顶层键不动 |
-| Pi | **完全覆盖** `providers` 目录：清空所有旧块，只写 **catalog(pi)** + defaultProvider/Model；settings 其它键不动 |
+| Pi | **完全覆盖** `providers` 目录：清空所有旧块，只写 **catalog(pi)** + defaultProvider/Model；settings 其它键不动；每块默认注入 `User-Agent: pi-coding-agent`（provider.headers 同名可覆盖） |
 
 > **OC/Pi 完全覆盖**：Apply 时 ModelHub 拥有整个 provider 目录——清空磁盘上**所有** provider 块（无论是否 ModelHub 写入），只重写同步目录中的 Provider。用户/其它工具手动加的块也会被清掉（既然都交给 ModelHub 管理）。写出块仍带 `_modelhub.managed` 元数据标记（供识别，不再影响清理范围）。OpenCode 的 `auth.json` 为追加式（只加不删），可能残留无用 key，无害。
 
