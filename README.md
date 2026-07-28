@@ -7,8 +7,24 @@ Provider-first 模型配置中枢，管理 Claude Code / Codex / OpenCode / Pi �
 ## 开发
 
 ```bash
-pnpm install
-pnpm tauri dev
+pnpm dev:tauri
+# 或
+bash scripts/dev.sh
+```
+
+`scripts/dev.sh`（参考 CourseraHub）会：
+
+1. 检查 node / pnpm / cargo
+2. 依赖缺失时自动 `pnpm install`
+3. 从首选端口（默认 `1420`，可用 `--port` / `MODELHUB_DEV_PORT`）起找空闲端口
+4. 同步 Vite（`MODELHUB_DEV_PORT`）与 Tauri `devUrl` 后启动 `pnpm tauri dev`
+
+只检查、不启动：
+
+```bash
+pnpm dev:check
+# 或
+bash scripts/dev.sh --check
 ```
 
 需要本机已安装 Node.js、pnpm 与 Rust 工具链。

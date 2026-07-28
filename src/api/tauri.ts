@@ -4,6 +4,7 @@ import type {
   AppConfig,
   ApplyResult,
   BackupEntry,
+  RestoreBackupResult,
   CatalogEntry,
   FullState,
   ImportItemDecision,
@@ -138,6 +139,13 @@ export async function runImport(
 
 export async function listBackups(): Promise<readonly BackupEntry[]> {
   return invoke("list_backups");
+}
+
+export async function restoreBackup(
+  agent: string,
+  stamp: string,
+): Promise<RestoreBackupResult> {
+  return invoke("restore_backup", { agent, stamp });
 }
 
 export async function revealApiKey(secretRef: string): Promise<string> {

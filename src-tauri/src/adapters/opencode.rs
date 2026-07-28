@@ -2,7 +2,11 @@ use anyhow::Result;
 use serde_json::{json, Map, Value};
 
 use super::backup_before_write;
-use super::util::{ensure_object, find_existing_provider_entry, read_json_value, write_json_value};
+use crate::backup::new_stamp;
+use super::util::{
+    ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
+    write_json_value,
+};
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys, resolve_upstream_model_id, AppConfig,
@@ -19,9 +23,10 @@ pub fn apply(
 ) -> Result<ApplyAgentResult> {
     let file = Paths::opencode_config(&config.paths)?;
     let auth_file = Paths::opencode_auth(&config.paths)?;
-    backup_before_write(paths, "opencode", &file, keep)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "opencode", &file, keep, &stamp)?;
     if auth_file.exists() {
-        backup_before_write(paths, "opencode", &auth_file, keep)?;
+        backup_before_write(paths, "opencode", &auth_file, keep, &stamp)?;
     }
 
     let mut root = read_json_value(&file)?;
@@ -32,11 +37,10 @@ pub fn apply(
         .or_insert_with(|| Value::Object(Map::new()));
     let provider_obj = ensure_object(provider_map)?;
 
-    // ModelHub owns the `provider` directory membership: rewrite only the sync
-    // catalog, but merge matched on-disk blocks so native/unknown settings on
-    // those providers and models survive. Other top-level keys stay untouched.
+    // Remove only stale blocks previously managed by ModelHub. Native/unmanaged
+    // providers stay untouched; catalog entries are merged into matching blocks.
     let existing_providers = provider_obj.clone();
-    provider_obj.clear();
+    retain_unmanaged_provider_entries(provider_obj);
 
     let enabled = svc.catalog_providers_with_models(store, "opencode");
     // Unique key per provider (names are globally unique); same map used by
@@ -136,17 +140,9 @@ fn merge_provider_entry(
         "baseURL".into(),
         Value::String(agent_write_base_url(&provider.base_url, &provider.protocol)),
     );
-    if !provider.headers.is_empty() {
-        let mut headers = options
-            .get("headers")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        for (k, v) in &provider.headers {
-            headers.insert(k.clone(), Value::String(v.clone()));
-        }
-        options.insert("headers".into(), Value::Object(headers));
-    }
+    // The UI-managed key is written to auth.json. Remove a stale inline key,
+    // which OpenCode would otherwise prefer over the newly written auth entry.
+    options.remove("apiKey");
     entry.insert("options".into(), Value::Object(options));
 
     let existing_models = entry
@@ -175,8 +171,7 @@ fn merge_provider_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Model, ModelCapabilities, Provider};
-    use std::collections::HashMap;
+    use crate::store::{Model, Provider};
 
     fn provider() -> Provider {
         Provider {
@@ -184,8 +179,6 @@ mod tests {
             name: "Renamed Provider".into(),
             base_url: "https://new.example.com".into(),
             protocol: Protocol::OpenaiCompletions,
-            headers: HashMap::from([("X-Managed".into(), "new".into())]),
-            compat: HashMap::new(),
             enabled: true,
             notes: String::new(),
             secret_ref: "sec_1".into(),
@@ -200,7 +193,6 @@ mod tests {
             provider_id: "prov_1".into(),
             model_id: "gpt-test".into(),
             display_name: "GPT Test New".into(),
-            capabilities: ModelCapabilities::default(),
             created_at: "now".into(),
             updated_at: "now".into(),
         }
@@ -214,6 +206,7 @@ mod tests {
             "customProviderField": { "keep": true },
             "options": {
                 "baseURL": "https://old.example.com/v1",
+                "apiKey": "stale-inline-key",
                 "timeout": 90000,
                 "headers": { "X-Native": "keep", "X-Managed": "old" }
             },
@@ -232,8 +225,9 @@ mod tests {
         assert_eq!(merged["customProviderField"]["keep"], true);
         assert_eq!(merged["options"]["timeout"], 90000);
         assert_eq!(merged["options"]["headers"]["X-Native"], "keep");
-        assert_eq!(merged["options"]["headers"]["X-Managed"], "new");
+        assert_eq!(merged["options"]["headers"]["X-Managed"], "old");
         assert_eq!(merged["options"]["baseURL"], "https://new.example.com/v1");
+        assert!(merged["options"].get("apiKey").is_none());
         assert_eq!(merged["models"]["gpt-test"]["limit"]["context"], 200000);
         assert_eq!(merged["models"]["gpt-test"]["customModelField"], "keep");
         assert_eq!(merged["models"]["gpt-test"]["name"], "GPT Test New");

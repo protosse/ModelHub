@@ -13,7 +13,12 @@ export function defaultTestHeaders(protocol: Protocol): Record<string, string> {
       "anthropic-beta": "context-1m-2025-08-07",
     };
   }
-  // openai-completions / openai-responses
+  if (protocol === "openai-responses") {
+    return {
+      "User-Agent": "codex_cli_rs/0.144.4",
+    };
+  }
+  // openai-completions
   return {
     "User-Agent": "openai-node",
   };
@@ -58,9 +63,12 @@ export function protocolAutoHeadersSummary(protocol?: Protocol): string {
   if (protocol === "anthropic-messages") {
     return "User-Agent: claude-cli · x-app: cli · anthropic-beta: context-1m";
   }
-  if (protocol === "openai-completions" || protocol === "openai-responses") {
+  if (protocol === "openai-completions") {
     return "User-Agent: openai-node";
   }
-  // multi / unknown: both families
-  return "anthropic → claude-cli+1m · openai → openai-node";
+  if (protocol === "openai-responses") {
+    return "User-Agent: codex_cli_rs/0.144.4";
+  }
+  // multi / unknown: all protocol families
+  return "anthropic → claude-cli+1m · completions → openai-node · responses → codex_cli_rs";
 }

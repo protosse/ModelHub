@@ -2,11 +2,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::util::{find_existing_provider_entry, read_json_value};
+use super::util::{
+    find_existing_provider_entry, is_modelhub_managed_provider, read_json_value,
+};
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
-    assign_catalog_write_keys, find_provider, resolve_upstream_model_id, AgentMode, AppConfig,
-    Secrets, Store, StoreService,
+    agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
+    AgentMode, AppConfig, Secrets, Store, StoreService,
 };
 use fs_err as fs;
 
@@ -50,8 +52,8 @@ pub fn preview_apply(
         match agent {
             "claude" => out.push(preview_claude(config, store, secrets)?),
             "codex" => out.push(preview_codex(config, store, secrets)?),
-            "opencode" => out.push(preview_opencode(svc, config, store)?),
-            "pi" => out.push(preview_pi(svc, config, store)?),
+            "opencode" => out.push(preview_opencode(svc, config, store, secrets)?),
+            "pi" => out.push(preview_pi(svc, config, store, secrets)?),
             _ => {}
         }
     }
@@ -197,8 +199,8 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
         AgentMode::Official => {
             lines.push(chg("model_provider", &cur_provider, "openai"));
             lines.push(DiffLine {
-                kind: "remove".into(),
-                text: "- [model_providers.modelhub] (removed if present)".into(),
+                kind: "same".into(),
+                text: "= [model_providers.*] 原有 Provider 块保留".into(),
             });
         }
         AgentMode::ThirdParty => {
@@ -211,7 +213,9 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
             } else {
                 store.agent_bindings.codex.provider_key.as_str()
             };
-            let new_base = provider.map(|p| p.base_url.as_str()).unwrap_or("");
+            let new_base = provider
+                .map(|p| agent_write_base_url(&p.base_url, &p.protocol))
+                .unwrap_or_default();
             let new_model = model.as_deref().unwrap_or("");
             let new_name = provider.map(|p| p.name.as_str()).unwrap_or("?");
             let new_key = provider
@@ -239,7 +243,7 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
             lines.push(chg(
                 &format!("model_providers.{key}.base_url"),
                 &cur_base,
-                new_base,
+                &new_base,
             ));
             lines.push(DiffLine {
                 kind: "same".into(),
@@ -273,14 +277,25 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
         agent: "codex".into(),
         file: file.display().to_string(),
         lines,
-        note: "其它 [model_providers.*] 会保留；运行时只看 model_provider".into(),
+        note: "只更新当前绑定与所选 Provider 的受管字段；其它 [model_providers.*] 及所选块的扩展字段保留".into(),
     })
 }
 
-fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<AgentDiff> {
+fn preview_opencode(
+    svc: &StoreService,
+    config: &AppConfig,
+    store: &Store,
+    secrets: &Secrets,
+) -> Result<AgentDiff> {
     let file = Paths::opencode_config(&config.paths)?;
+    let auth_file = Paths::opencode_auth(&config.paths)?;
     let current = if file.exists() {
         read_json_value(&file).unwrap_or(Value::Object(Default::default()))
+    } else {
+        Value::Object(Default::default())
+    };
+    let auth = if auth_file.exists() {
+        read_json_value(&auth_file).unwrap_or(Value::Object(Default::default()))
     } else {
         Value::Object(Default::default())
     };
@@ -305,21 +320,25 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
     let key_map = assign_catalog_write_keys(
         &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
     );
-    let active = store
-        .agent_bindings
-        .opencode
-        .provider_id
-        .as_deref()
-        .and_then(|pid| key_map.get(pid).cloned().zip(
-            store
-                .agent_bindings
-                .opencode
-                .model_id
-                .as_deref()
-                .and_then(|mid| resolve_upstream_model_id(store, mid)),
-        ))
-        .map(|(key, m)| format!("{key}/{m}"))
-        .unwrap_or_default();
+    // Apply only writes `model` when BOTH provider and model are set; otherwise
+    // leave disk value alone. Mirror that so an unset binding is not a phantom change.
+    let active = match (
+        store
+            .agent_bindings
+            .opencode
+            .provider_id
+            .as_deref()
+            .and_then(|pid| key_map.get(pid).cloned()),
+        store
+            .agent_bindings
+            .opencode
+            .model_id
+            .as_deref()
+            .and_then(|mid| resolve_upstream_model_id(store, mid)),
+    ) {
+        (Some(key), Some(m)) => format!("{key}/{m}"),
+        _ => cur_model.clone(),
+    };
 
     let mut lines = vec![
         DiffLine {
@@ -362,14 +381,29 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
         push_model_diff_lines(&mut lines, &disk_ids, models);
+
+        // Key lives in auth.json (preferred) or legacy options.apiKey on the block.
+        let new_key = secrets
+            .secrets
+            .get(&p.secret_ref)
+            .map(|s| s.api_key.as_str())
+            .unwrap_or("");
+        let disk_key_name = matched.map(|(k, _)| k).unwrap_or(key.as_str());
+        let cur_token = opencode_disk_token(&auth, matched.map(|(_, v)| v), disk_key_name, &key);
+        push_secret_diff_line(
+            &mut lines,
+            &format!("auth.json[{key}]"),
+            &cur_token,
+            new_key,
+        );
     }
     push_orphan_block_lines(&mut lines, &existing, &write_keys);
 
     Ok(AgentDiff {
         agent: "opencode".into(),
-        file: file.display().to_string(),
+        file: format!("{} + {}", file.display(), auth_file.display()),
         lines,
-        note: "同步目录控制 provider 范围；匹配 Provider/模型保留原有扩展配置，目录外 Provider 删除；mcp/plugin 等其它字段不动".into(),
+        note: "同步目录控制 ModelHub 管理块；匹配 Provider/模型保留原有扩展配置，退出目录的受管块删除，未受管 Provider 与 mcp/plugin 等其它字段保留；密钥写入 auth.json".into(),
     })
 }
 
@@ -396,7 +430,12 @@ fn _append_model_diff_removed(lines: &mut Vec<DiffLine>, disk_ids: &[String], ne
     }
 }
 
-fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<AgentDiff> {
+fn preview_pi(
+    svc: &StoreService,
+    config: &AppConfig,
+    store: &Store,
+    secrets: &Secrets,
+) -> Result<AgentDiff> {
     let models_file = Paths::pi_models(&config.paths)?;
     let settings_file = Paths::pi_settings(&config.paths)?;
     let settings = if settings_file.exists() {
@@ -496,6 +535,23 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
             })
             .unwrap_or_default();
         push_model_diff_lines(&mut lines, &disk_ids, models);
+
+        let new_key = secrets
+            .secrets
+            .get(&p.secret_ref)
+            .map(|s| s.api_key.as_str())
+            .unwrap_or("");
+        let cur_token = matched
+            .map(|(_, value)| value)
+            .and_then(|v| v.get("apiKey"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        push_secret_diff_line(
+            &mut lines,
+            &format!("providers.{key}.apiKey"),
+            cur_token,
+            new_key,
+        );
     }
     push_orphan_block_lines(&mut lines, &existing, &write_keys);
 
@@ -507,7 +563,7 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
             settings_file.display()
         ),
         lines,
-        note: "同步目录控制 providers 范围；匹配 Provider/模型保留原有 compat 等扩展配置，目录外 Provider 删除".into(),
+        note: "同步目录控制 ModelHub 管理块；匹配 Provider/模型保留 headers、compat 等扩展配置，退出目录的受管块删除，未受管 Provider 保留".into(),
     })
 }
 
@@ -542,24 +598,90 @@ fn push_model_diff_lines(
     }
 }
 
-/// Report disk provider blocks that ModelHub will NOT write this round (not in
-/// the sync catalog, so their key isn't in `writing_keys`). Apply fully
-/// overwrites the OC/Pi provider map — every orphan block is deleted, whether
-/// ModelHub-managed or hand-added — so surface them all as removals.
+/// Report stale ModelHub-managed provider blocks that are no longer in the sync
+/// catalog. Native/unmanaged blocks are outside ModelHub's ownership and remain.
 fn push_orphan_block_lines(
     lines: &mut Vec<DiffLine>,
     existing: &serde_json::Map<String, Value>,
     writing_keys: &std::collections::HashSet<String>,
 ) {
     let mut orphans: Vec<&String> = existing
-        .keys()
-        .filter(|k| !writing_keys.contains(k.as_str()))
+        .iter()
+        .filter(|(k, value)| {
+            !writing_keys.contains(k.as_str()) && is_modelhub_managed_provider(value)
+        })
+        .map(|(k, _)| k)
         .collect();
     orphans.sort();
     for key in orphans {
         lines.push(DiffLine {
             kind: "remove".into(),
             text: format!("- provider `{key}`（不在同步目录 → 将删除）"),
+        });
+    }
+}
+
+
+/// Resolve OpenCode's effective disk token for a catalog provider.
+/// Prefer auth.json under the disk key (or the target write key); fall back to
+/// legacy inline `options.apiKey` on the provider block (which Apply clears).
+fn opencode_disk_token(
+    auth: &Value,
+    block: Option<&Value>,
+    disk_key: &str,
+    write_key: &str,
+) -> String {
+    let from_auth = |key: &str| -> Option<String> {
+        auth.get(key)
+            .and_then(|v| v.get("key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    if let Some(t) = from_auth(disk_key) {
+        return t;
+    }
+    if disk_key != write_key {
+        if let Some(t) = from_auth(write_key) {
+            return t;
+        }
+    }
+    block
+        .and_then(|v| v.get("options"))
+        .and_then(|v| v.get("apiKey"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Masked secret line: compares real tokens, never prints them.
+fn push_secret_diff_line(lines: &mut Vec<DiffLine>, field: &str, cur: &str, new: &str) {
+    if new.is_empty() {
+        if cur.is_empty() {
+            lines.push(DiffLine {
+                kind: "same".into(),
+                text: format!("= {field}: (empty)"),
+            });
+        } else {
+            lines.push(DiffLine {
+                kind: "remove".into(),
+                text: format!("! {field}: API Key missing in ModelHub"),
+            });
+        }
+    } else if cur.is_empty() {
+        lines.push(DiffLine {
+            kind: "add".into(),
+            text: format!("+ {field} = ***"),
+        });
+    } else if cur != new {
+        lines.push(DiffLine {
+            kind: "change".into(),
+            text: format!("~ {field} = *** (changed)"),
+        });
+    } else {
+        lines.push(DiffLine {
+            kind: "same".into(),
+            text: format!("= {field}: unchanged"),
         });
     }
 }
@@ -591,6 +713,7 @@ fn chg(field: &str, old: &str, new: &str) -> DiffLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn model_removed_from_catalog_is_a_real_preview_change() {
@@ -602,5 +725,50 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].kind, "remove");
         assert!(lines[0].text.contains("removed-model"));
+    }
+
+    #[test]
+    fn secret_diff_reports_key_only_changes() {
+        let mut lines = Vec::new();
+        push_secret_diff_line(&mut lines, "auth.json[foo]", "old-key", "new-key");
+        assert_eq!(lines[0].kind, "change");
+        assert!(lines[0].text.contains("***"));
+        assert!(!lines[0].text.contains("old-key"));
+
+        let mut lines = Vec::new();
+        push_secret_diff_line(&mut lines, "auth.json[foo]", "same", "same");
+        assert_eq!(lines[0].kind, "same");
+        assert!(lines[0].text.contains("unchanged"));
+
+        let mut lines = Vec::new();
+        push_secret_diff_line(&mut lines, "auth.json[foo]", "", "fresh");
+        assert_eq!(lines[0].kind, "add");
+    }
+
+    #[test]
+    fn opencode_disk_token_prefers_auth_then_inline() {
+        let auth = json!({
+            "foo": { "type": "api", "key": "from-auth" }
+        });
+        let block = json!({
+            "options": { "apiKey": "from-inline" }
+        });
+        assert_eq!(
+            opencode_disk_token(&auth, Some(&block), "foo", "foo"),
+            "from-auth"
+        );
+        let empty_auth = json!({});
+        assert_eq!(
+            opencode_disk_token(&empty_auth, Some(&block), "foo", "foo"),
+            "from-inline"
+        );
+        // When the block was under an old slug, still accept auth under write key.
+        let auth2 = json!({
+            "new-slug": { "type": "api", "key": "renamed-auth" }
+        });
+        assert_eq!(
+            opencode_disk_token(&auth2, Some(&block), "old-slug", "new-slug"),
+            "renamed-auth"
+        );
     }
 }

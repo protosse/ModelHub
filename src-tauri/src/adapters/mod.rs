@@ -79,7 +79,8 @@ pub(crate) fn backup_before_write(
     agent: &str,
     file: &std::path::Path,
     keep: u32,
+    stamp: &str,
 ) -> Result<()> {
-    let _ = backup::backup_file(paths, agent, file, keep)?;
+    let _ = backup::backup_file(paths, agent, file, keep, stamp)?;
     Ok(())
 }

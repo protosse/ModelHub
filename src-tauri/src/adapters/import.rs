@@ -6,8 +6,8 @@ use super::util::read_json_value;
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
     normalize_base_url, now_iso, provider_endpoint_key, AppConfig, ImportAction, ImportPreview,
-    ImportPreviewItem, ImportRequest, ImportResult, Model, ModelCapabilities, Protocol, Provider,
-    SecretEntry, StoreService,
+    ImportPreviewItem, ImportRequest, ImportResult, Model, Protocol, Provider, SecretEntry,
+    StoreService,
 };
 use fs_err as fs;
 
@@ -18,7 +18,7 @@ struct Candidate {
     base_url: String,
     protocol: Protocol,
     api_key: String,
-    models: Vec<(String, String, bool)>, // id, display, reasoning
+    models: Vec<(String, String)>, // id, display
 }
 
 fn collect_candidates(config: &AppConfig) -> Result<(Vec<Candidate>, Vec<String>)> {
@@ -61,7 +61,7 @@ fn collect_candidates(config: &AppConfig) -> Result<(Vec<Candidate>, Vec<String>
                                         .and_then(|v| v.as_str())
                                         .unwrap_or(mid)
                                         .to_string();
-                                    models.push((mid.clone(), display, false));
+                                    models.push((mid.clone(), display));
                                 }
                             }
                             raw.push(Candidate {
@@ -119,11 +119,7 @@ fn collect_candidates(config: &AppConfig) -> Result<(Vec<Candidate>, Vec<String>
                                         .and_then(|v| v.as_str())
                                         .unwrap_or(&mid)
                                         .to_string();
-                                    let reasoning = m
-                                        .get("reasoning")
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-                                    models.push((mid, display, reasoning));
+                                    models.push((mid, display));
                                 }
                             }
                             raw.push(Candidate {
@@ -173,7 +169,7 @@ fn collect_candidates(config: &AppConfig) -> Result<(Vec<Candidate>, Vec<String>
                             base_url: base,
                             protocol: Protocol::AnthropicMessages,
                             api_key: key,
-                            models: vec![(model.clone(), model, false)],
+                            models: vec![(model.clone(), model)],
                         });
                     }
                 }
@@ -225,7 +221,7 @@ fn collect_candidates(config: &AppConfig) -> Result<(Vec<Candidate>, Vec<String>
                                     base_url: base,
                                     protocol,
                                     api_key,
-                                    models: vec![(active_model.clone(), active_model.clone(), false)],
+                                    models: vec![(active_model.clone(), active_model.clone())],
                                 });
                             }
                         }
@@ -322,7 +318,7 @@ fn merge_candidates(raw: Vec<Candidate>) -> Vec<Candidate> {
                     exist.name = c.name;
                 }
                 let mut seen: HashSet<String> =
-                    exist.models.iter().map(|(id, _, _)| id.clone()).collect();
+                    exist.models.iter().map(|(id, _)| id.clone()).collect();
                 for m in c.models {
                     if seen.insert(m.0.clone()) {
                         exist.models.push(m);
@@ -371,7 +367,7 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
                 .unwrap_or(true);
         let batch_dup = name_counts.get(&c.name.to_lowercase()).copied().unwrap_or(0) > 1;
 
-        let model_ids: Vec<String> = c.models.iter().map(|(id, _, _)| id.clone()).collect();
+        let model_ids: Vec<String> = c.models.iter().map(|(id, _)| id.clone()).collect();
         let (new_model_ids, existing_model_ids, extra_model_count) =
             if let Some((pid, _)) = existing {
                 let have: HashSet<String> = store
@@ -382,7 +378,7 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
                     .collect();
                 let mut neu = Vec::new();
                 let mut old = Vec::new();
-                for (id, _, _) in &c.models {
+                for (id, _) in &c.models {
                     if have.contains(id) {
                         old.push(id.clone());
                     } else {
@@ -537,8 +533,6 @@ pub fn import_from_agents(
                     name: final_name.clone(),
                     base_url: normalize_base_url(&c.base_url),
                     protocol: c.protocol.clone(),
-                    headers: HashMap::new(),
-                    compat: HashMap::new(),
                     enabled: true,
                     notes: format!("imported from {}", c.source),
                     secret_ref: secret_ref.clone(),
@@ -580,8 +574,8 @@ pub fn import_from_agents(
             }
 
             let old_name_key = provider.name.to_lowercase();
-            // Preserve headers / compat / enabled / user notes; only update
-            // identity fields + non-empty api key + source note if empty.
+            // Only update UI-managed identity fields + non-empty API key +
+            // source note if empty. Agent-native extras never enter the Store.
             provider.name = final_name.clone();
             provider.base_url = normalize_base_url(&c.base_url);
             provider.protocol = c.protocol.clone();
@@ -622,7 +616,7 @@ pub fn import_from_agents(
             .map(|m| m.model_id.clone())
             .collect();
 
-        for (mid, display, reasoning) in &c.models {
+        for (mid, display) in &c.models {
             if existing_model_ids.contains(mid) {
                 continue;
             }
@@ -631,10 +625,6 @@ pub fn import_from_agents(
                 provider_id: target_id.clone(),
                 model_id: mid.clone(),
                 display_name: display.clone(),
-                capabilities: ModelCapabilities {
-                    reasoning: *reasoning,
-                    vision: false,
-                },
                 created_at: now.clone(),
                 updated_at: now.clone(),
             });

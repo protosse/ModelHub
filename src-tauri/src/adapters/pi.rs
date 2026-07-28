@@ -2,7 +2,11 @@ use anyhow::Result;
 use serde_json::{json, Map, Value};
 
 use super::backup_before_write;
-use super::util::{ensure_object, find_existing_provider_entry, read_json_value, write_json_value};
+use crate::backup::new_stamp;
+use super::util::{
+    ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
+    write_json_value,
+};
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
@@ -19,9 +23,10 @@ pub fn apply(
 ) -> Result<ApplyAgentResult> {
     let models_file = Paths::pi_models(&config.paths)?;
     let settings_file = Paths::pi_settings(&config.paths)?;
-    backup_before_write(paths, "pi", &models_file, keep)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "pi", &models_file, keep, &stamp)?;
     if settings_file.exists() {
-        backup_before_write(paths, "pi", &settings_file, keep)?;
+        backup_before_write(paths, "pi", &settings_file, keep, &stamp)?;
     }
 
     let mut root = read_json_value(&models_file)?;
@@ -32,11 +37,10 @@ pub fn apply(
         .or_insert_with(|| Value::Object(Map::new()));
     let providers = ensure_object(providers_val)?;
 
-    // ModelHub owns the provider directory membership: rewrite only the sync
-    // catalog, but merge matched on-disk blocks so native/unknown settings on
-    // those providers and models survive. Blocks outside the catalog are dropped.
+    // Remove only stale blocks previously managed by ModelHub. Native/unmanaged
+    // providers stay untouched; catalog entries are merged into matching blocks.
     let existing_providers = providers.clone();
-    providers.clear();
+    retain_unmanaged_provider_entries(providers);
 
     let enabled = svc.catalog_providers_with_models(store, "pi");
     // Unique key per provider (names are globally unique); same map used by
@@ -125,30 +129,20 @@ fn merge_provider_entry(
         entry.remove("authHeader");
     }
 
-    // Preserve native headers not managed by ModelHub. The required Pi UA is
-    // the default, and explicit Provider headers win for the same JSON key.
+    // Preserve native headers. Only seed Pi's default UA when the local block
+    // does not already specify one.
     let mut headers = entry
         .get("headers")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    headers.insert("User-Agent".into(), Value::String("pi-coding-agent".into()));
-    for (k, v) in &provider.headers {
-        headers.insert(k.clone(), Value::String(v.clone()));
+    if !headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("User-Agent"))
+    {
+        headers.insert("User-Agent".into(), Value::String("pi-coding-agent".into()));
     }
     entry.insert("headers".into(), Value::Object(headers));
-
-    if !provider.compat.is_empty() {
-        let mut compat = entry
-            .get("compat")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        for (k, v) in &provider.compat {
-            compat.insert(k.clone(), v.clone());
-        }
-        entry.insert("compat".into(), Value::Object(compat));
-    }
 
     let existing_models: std::collections::HashMap<String, &Value> = entry
         .get("models")
@@ -172,10 +166,6 @@ fn merge_provider_entry(
                 .unwrap_or_default();
             model_entry.insert("id".into(), Value::String(model.model_id.clone()));
             model_entry.insert("name".into(), Value::String(model.display_name.clone()));
-            model_entry.insert(
-                "reasoning".into(),
-                Value::Bool(model.capabilities.reasoning),
-            );
             Value::Object(model_entry)
         })
         .collect();
@@ -190,8 +180,7 @@ fn merge_provider_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Model, ModelCapabilities, Provider};
-    use std::collections::HashMap;
+    use crate::store::{Model, Provider};
 
     fn provider() -> Provider {
         Provider {
@@ -199,8 +188,6 @@ mod tests {
             name: "Pi Provider".into(),
             base_url: "https://new.example.com".into(),
             protocol: Protocol::OpenaiResponses,
-            headers: HashMap::from([("X-Managed".into(), "new".into())]),
-            compat: HashMap::from([("managedCompat".into(), json!("new"))]),
             enabled: true,
             notes: String::new(),
             secret_ref: "sec_1".into(),
@@ -215,10 +202,6 @@ mod tests {
             provider_id: "prov_1".into(),
             model_id: "pi-test".into(),
             display_name: "Pi Test New".into(),
-            capabilities: ModelCapabilities {
-                reasoning: true,
-                vision: false,
-            },
             created_at: "now".into(),
             updated_at: "now".into(),
         }
@@ -230,7 +213,11 @@ mod tests {
             "baseUrl": "https://old.example.com/v1",
             "api": "old-api",
             "customProviderField": { "keep": true },
-            "headers": { "X-Native": "keep", "X-Managed": "old" },
+            "headers": {
+                "user-agent": "native-pi-client",
+                "X-Native": "keep",
+                "X-Managed": "old"
+            },
             "compat": { "nativeCompat": true, "managedCompat": "old" },
             "models": [
                 {
@@ -248,15 +235,24 @@ mod tests {
 
         assert_eq!(merged["customProviderField"]["keep"], true);
         assert_eq!(merged["headers"]["X-Native"], "keep");
-        assert_eq!(merged["headers"]["X-Managed"], "new");
+        assert_eq!(merged["headers"]["X-Managed"], "old");
+        assert_eq!(merged["headers"]["user-agent"], "native-pi-client");
+        assert!(merged["headers"].get("User-Agent").is_none());
         assert_eq!(merged["compat"]["nativeCompat"], true);
-        assert_eq!(merged["compat"]["managedCompat"], "new");
+        assert_eq!(merged["compat"]["managedCompat"], "old");
         assert_eq!(merged["baseUrl"], "https://new.example.com/v1");
         assert_eq!(merged["apiKey"], "secret");
         assert_eq!(merged["models"][0]["contextWindow"], 200000);
         assert_eq!(merged["models"][0]["customModelField"], "keep");
         assert_eq!(merged["models"][0]["name"], "Pi Test New");
-        assert_eq!(merged["models"][0]["reasoning"], true);
+        assert_eq!(merged["models"][0]["reasoning"], false);
         assert_eq!(merged["models"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_pi_provider_gets_default_user_agent() {
+        let merged = merge_provider_entry(None, &provider(), &[model()], "secret");
+
+        assert_eq!(merged["headers"]["User-Agent"], "pi-coding-agent");
     }
 }

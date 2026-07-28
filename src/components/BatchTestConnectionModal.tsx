@@ -522,7 +522,7 @@ export function BatchTestConnectionModal({
           <div className="space-y-1.5">
             <p className="text-[11px] leading-relaxed text-ink-3">
               已自动附加：{protocolAutoHeadersSummary(provider.protocol)}。
-              下方仅写需要覆盖/追加的行；留空则只用自动默认 + Provider headers。
+              下方仅写需要覆盖/追加的行；留空则只用协议自动默认请求头。
             </p>
             <textarea
               className="input min-h-[72px] w-full resize-y font-mono text-xs"

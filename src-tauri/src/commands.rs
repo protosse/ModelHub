@@ -1,5 +1,5 @@
 use crate::adapters;
-use crate::backup::{self, BackupEntry};
+use crate::backup::{self, BackupEntry, RestoreBackupResult};
 use crate::paths::ModelHubPaths;
 use crate::store::{
     AgentBindings, AppConfig, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
@@ -139,6 +139,15 @@ pub fn list_provider_names() -> Result<Vec<String>, String> {
 pub fn list_backups() -> Result<Vec<BackupEntry>, String> {
     let (_, paths) = svc()?;
     backup::list_backups(&paths).map_err(|e| e.to_string())
+}
+
+/// Restore one backup snapshot (agent + stamp) onto current live Agent paths.
+/// Creates a safety backup of current live files first.
+#[tauri::command]
+pub fn restore_backup(agent: String, stamp: String) -> Result<RestoreBackupResult, String> {
+    let (svc, paths) = svc()?;
+    let config = svc.load_config().map_err(|e| e.to_string())?;
+    backup::restore_snapshot(&paths, &config, &agent, &stamp).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

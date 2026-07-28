@@ -123,8 +123,6 @@ impl StoreService {
             name,
             base_url: normalize_base_url(&input.base_url),
             protocol: input.protocol,
-            headers: input.headers,
-            compat: input.compat,
             enabled: input.enabled,
             notes: input.notes,
             secret_ref: secret_ref.clone(),
@@ -182,8 +180,6 @@ impl StoreService {
         provider.name = name;
         provider.base_url = normalize_base_url(&input.base_url);
         provider.protocol = input.protocol;
-        provider.headers = input.headers;
-        provider.compat = input.compat;
         provider.enabled = input.enabled;
         provider.notes = input.notes;
         provider.updated_at = now.clone();
@@ -248,8 +244,6 @@ impl StoreService {
             base_url: source.base_url,
             protocol: source.protocol,
             api_key: new_api_key.to_string(),
-            headers: source.headers,
-            compat: source.compat,
             enabled: source.enabled,
             notes: source.notes,
         })?;
@@ -262,7 +256,6 @@ impl StoreService {
                 provider_id: created.id.clone(),
                 model_id: m.model_id,
                 display_name: m.display_name,
-                capabilities: m.capabilities,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             });
@@ -287,7 +280,6 @@ impl StoreService {
             provider_id: input.provider_id,
             model_id: input.model_id,
             display_name: input.display_name,
-            capabilities: input.capabilities,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -323,7 +315,6 @@ impl StoreService {
                 provider_id: input.provider_id,
                 model_id: input.model_id,
                 display_name: input.display_name,
-                capabilities: input.capabilities,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
@@ -354,7 +345,6 @@ impl StoreService {
         model.provider_id = input.provider_id;
         model.model_id = input.model_id;
         model.display_name = input.display_name;
-        model.capabilities = input.capabilities;
         model.updated_at = now_iso();
         let out = model.clone();
         self.save_store(&store)?;
@@ -855,7 +845,7 @@ pub fn provider_slug(provider: &Provider) -> String {
     }
 }
 
-/// Assign a unique write-out key per provider for a full-overwrite agent
+/// Assign a unique write-out key per ModelHub-managed provider in an agent
 /// directory (OpenCode / Pi). Keys derive from the provider name slug (names are
 /// globally unique) and are de-duplicated within the set by appending `-2`, `-3`
 /// so two providers sharing a base_url but differing by protocol (e.g.

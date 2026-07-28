@@ -36,10 +36,6 @@ pub async fn fetch_remote_models(
             _ => req.header("Authorization", format!("Bearer {api_key}")),
         };
     }
-    for (k, v) in &provider.headers {
-        req = req.header(k, v);
-    }
-
     let resp = req.send().await.with_context(|| format!("request {url}"))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();

@@ -69,10 +69,6 @@ pub struct Provider {
     pub name: String,
     pub base_url: String,
     pub protocol: Protocol,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    #[serde(default)]
-    pub compat: HashMap<String, serde_json::Value>,
     pub enabled: bool,
     #[serde(default)]
     pub notes: String,
@@ -83,31 +79,11 @@ pub struct Provider {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelCapabilities {
-    #[serde(default)]
-    pub reasoning: bool,
-    #[serde(default)]
-    pub vision: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            reasoning: false,
-            vision: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
     pub provider_id: String,
     pub model_id: String,
     pub display_name: String,
-    #[serde(default)]
-    pub capabilities: ModelCapabilities,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -145,7 +121,7 @@ pub struct TestConnectionRequest {
     /// Request timeout in seconds (clamped server-side). Default 30.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Optional per-run extra HTTP headers (merged after provider.headers; same key overwrites).
+    /// Optional per-run extra HTTP headers (merged after protocol defaults; same key overwrites).
     #[serde(default)]
     pub extra_headers: Option<std::collections::HashMap<String, String>>,
 }
@@ -400,10 +376,6 @@ pub struct ProviderInput {
     pub base_url: String,
     pub protocol: Protocol,
     pub api_key: String,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    #[serde(default)]
-    pub compat: HashMap<String, serde_json::Value>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -420,8 +392,6 @@ pub struct ModelInput {
     pub provider_id: String,
     pub model_id: String,
     pub display_name: String,
-    #[serde(default)]
-    pub capabilities: ModelCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

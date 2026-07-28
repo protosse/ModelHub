@@ -10,8 +10,6 @@ export type Provider = {
   readonly name: string;
   readonly baseUrl: string;
   readonly protocol: Protocol;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly compat: Readonly<Record<string, unknown>>;
   readonly enabled: boolean;
   readonly notes: string;
   readonly secretRef: string;
@@ -19,17 +17,11 @@ export type Provider = {
   readonly updatedAt: string;
 };
 
-export type ModelCapabilities = {
-  readonly reasoning: boolean;
-  readonly vision: boolean;
-};
-
 export type Model = {
   readonly id: string;
   readonly providerId: string;
   readonly modelId: string;
   readonly displayName: string;
-  readonly capabilities: ModelCapabilities;
   readonly createdAt: string;
   readonly updatedAt: string;
 };
@@ -169,8 +161,6 @@ export type ProviderInput = {
   readonly baseUrl: string;
   readonly protocol: Protocol;
   readonly apiKey: string;
-  readonly headers?: Readonly<Record<string, string>>;
-  readonly compat?: Readonly<Record<string, unknown>>;
   readonly enabled?: boolean;
   readonly notes?: string;
 };
@@ -179,7 +169,6 @@ export type ModelInput = {
   readonly providerId: string;
   readonly modelId: string;
   readonly displayName: string;
-  readonly capabilities?: ModelCapabilities;
 };
 
 export type ApplyAgentResult = {
@@ -242,6 +231,16 @@ export type BackupEntry = {
   readonly stamp: string;
   readonly fileName: string;
   readonly path: string;
+};
+
+export type RestoreBackupResult = {
+  readonly agent: string;
+  readonly stamp: string;
+  readonly ok: boolean;
+  readonly message: string;
+  readonly files: readonly string[];
+  readonly safetyStamp: string | null;
+  readonly restartRequired: boolean;
 };
 
 export type PageId =

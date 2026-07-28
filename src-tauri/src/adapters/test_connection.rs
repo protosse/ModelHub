@@ -115,18 +115,10 @@ pub async fn test_model_connection(
     let request_body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
 
     // Merge order (later wins on same key):
-    //   1) protocol client defaults (Claude Code / openai-node)
-    //   2) provider.headers
-    //   3) per-run extra_headers from the UI
+    //   1) protocol client defaults (Claude Code / openai-node / Codex)
+    //   2) per-run extra_headers from the UI
     // This lets multi-provider runs mix protocols without one shared UA clobbering the other.
     let mut merged_headers = protocol_default_headers(&provider.protocol);
-    for (k, v) in &provider.headers {
-        let key = k.trim();
-        if key.is_empty() {
-            continue;
-        }
-        merged_headers.insert(key.to_string(), v.clone());
-    }
     if let Some(extra) = extra_headers {
         for (k, v) in extra {
             let key = k.trim();
@@ -150,7 +142,7 @@ pub async fn test_model_connection(
         }
     ));
     log.push(format!(
-        "header merge: protocol defaults → provider.headers → run extra ({} header(s))",
+        "header merge: protocol defaults → run extra ({} header(s))",
         merged_headers.len()
     ));
     log.push(format!("POST {url}"));
@@ -285,7 +277,7 @@ pub async fn test_model_connection(
 }
 
 /// Client identity defaults so gateways that check User-Agent accept the probe.
-/// Applied first; provider.headers and run extraHeaders can override.
+/// Applied first; per-run extraHeaders can override.
 fn protocol_default_headers(protocol: &Protocol) -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     match protocol {
@@ -297,8 +289,11 @@ fn protocol_default_headers(protocol: &Protocol) -> std::collections::HashMap<St
             // "1m 上下文已经全量可用，请启用 1m 上下文后重试".
             m.insert("anthropic-beta".into(), "context-1m-2025-08-07".into());
         }
-        Protocol::OpenaiCompletions | Protocol::OpenaiResponses => {
+        Protocol::OpenaiCompletions => {
             m.insert("User-Agent".into(), "openai-node".into());
+        }
+        Protocol::OpenaiResponses => {
+            m.insert("User-Agent".into(), "codex_cli_rs/0.144.4".into());
         }
     }
     m
@@ -474,4 +469,24 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let head: String = s.chars().take(max).collect();
     format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_agent_specific_user_agents_for_openai_protocols() {
+        let completions = protocol_default_headers(&Protocol::OpenaiCompletions);
+        let responses = protocol_default_headers(&Protocol::OpenaiResponses);
+
+        assert_eq!(
+            completions.get("User-Agent").map(String::as_str),
+            Some("openai-node")
+        );
+        assert_eq!(
+            responses.get("User-Agent").map(String::as_str),
+            Some("codex_cli_rs/0.144.4")
+        );
+    }
 }

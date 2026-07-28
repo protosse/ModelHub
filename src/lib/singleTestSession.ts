@@ -17,7 +17,7 @@ export type SingleTestSession = {
   timeoutSecs: number;
   selectedPromptId: string;
   saveName: string;
-  /** Extra HTTP headers for this run (merged after provider.headers). */
+  /** Extra HTTP headers for this run (merged after protocol defaults). */
   extraHeaders: Record<string, string>;
   busy: boolean;
   /** When true, in-flight invoke result will be discarded when it returns. */

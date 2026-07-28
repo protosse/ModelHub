@@ -883,7 +883,6 @@ function ProviderDetail({
                   providerId: provider.id,
                   modelId: item.modelId,
                   displayName: item.displayName,
-                  capabilities: { reasoning: false, vision: false },
                 })),
               );
               await onRefresh();
@@ -1061,7 +1060,6 @@ function ModelEditRow({
                   providerId: model.providerId,
                   modelId: modelId.trim(),
                   displayName: displayName.trim() || modelId.trim(),
-                  capabilities: model.capabilities,
                 });
                 await onSaved();
               } catch (e) {
@@ -1175,8 +1173,6 @@ function ProviderFormModal({
                 protocol,
                 apiKey: apiKey.trim(),
                 notes,
-                headers: initial?.headers ?? {},
-                compat: initial?.compat ?? {},
               });
             } catch (e) {
               setErr(e instanceof Error ? e.message : String(e));

@@ -154,12 +154,20 @@ export default function App() {
       ) : null}
       {visited.has("backups") ? (
         <div className={pagePaneClass(page === "backups")}>
-          <BackupsPage onToast={showToast} />
+          <BackupsPage
+            state={state}
+            active={page === "backups"}
+            onToast={showToast}
+          />
         </div>
       ) : null}
       {visited.has("settings") ? (
         <div className={pagePaneClass(page === "settings")}>
-          <SettingsPage state={state} />
+          <SettingsPage
+            state={state}
+            onRefresh={refresh}
+            onToast={showToast}
+          />
         </div>
       ) : null}
     </Layout>

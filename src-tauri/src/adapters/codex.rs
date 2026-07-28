@@ -3,10 +3,11 @@ use fs_err as fs;
 use toml::value::{Table, Value};
 
 use super::backup_before_write;
+use crate::backup::new_stamp;
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
-    find_provider, resolve_upstream_model_id, AgentMode, AppConfig, ApplyAgentResult, Protocol,
-    Secrets, Store, StoreService,
+    agent_write_base_url, find_provider, resolve_upstream_model_id, AgentMode, AppConfig,
+    ApplyAgentResult, Protocol, Secrets, Store, StoreService,
 };
 
 const MANAGED_KEY_DEFAULT: &str = "modelhub";
@@ -20,7 +21,8 @@ pub fn apply(
     keep: u32,
 ) -> Result<ApplyAgentResult> {
     let file = Paths::codex_config(&config.paths)?;
-    backup_before_write(paths, "codex", &file, keep)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "codex", &file, keep, &stamp)?;
 
     let mut root = if file.exists() {
         let text = fs::read_to_string(&file)?;
@@ -39,8 +41,6 @@ pub fn apply(
     match store.agent_bindings.codex.mode {
         AgentMode::Official => {
             table.insert("model_provider".into(), Value::String("openai".into()));
-            remove_managed_provider(table, MANAGED_KEY_DEFAULT);
-            remove_managed_provider(table, &store.agent_bindings.codex.provider_key);
             write_toml_atomic(&file, &root)?;
             return Ok(ApplyAgentResult {
                 agent: "codex".into(),
@@ -90,9 +90,6 @@ pub fn apply(
         );
     }
 
-    remove_managed_provider(table, MANAGED_KEY_DEFAULT);
-    remove_managed_provider(table, &provider_key);
-
     table.insert("model".into(), Value::String(model_id.clone()));
     table.insert(
         "model_provider".into(),
@@ -105,15 +102,8 @@ pub fn apply(
         .as_table_mut()
         .context("model_providers must be table")?;
 
-    let mut block = Table::new();
-    block.insert("name".into(), Value::String(provider.name.clone()));
-    block.insert("base_url".into(), Value::String(provider.base_url.clone()));
-    block.insert("wire_api".into(), Value::String("responses".into()));
-    // Provider-scoped key; leave auth.json alone (scheme B / cc-switch preserve path).
-    block.insert(
-        "experimental_bearer_token".into(),
-        Value::String(api_key),
-    );
+    let existing = providers.get(&provider_key).and_then(Value::as_table);
+    let block = merge_provider_block(existing, provider, api_key);
     providers.insert(provider_key.clone(), Value::Table(block));
 
     write_toml_atomic(&file, &root)?;
@@ -137,13 +127,24 @@ pub fn apply(
     })
 }
 
-fn remove_managed_provider(table: &mut Table, key: &str) {
-    if key.is_empty() {
-        return;
-    }
-    if let Some(Value::Table(providers)) = table.get_mut("model_providers") {
-        providers.remove(key);
-    }
+fn merge_provider_block(
+    existing: Option<&Table>,
+    provider: &crate::store::Provider,
+    api_key: String,
+) -> Table {
+    let mut block = existing.cloned().unwrap_or_default();
+    block.insert("name".into(), Value::String(provider.name.clone()));
+    block.insert(
+        "base_url".into(),
+        Value::String(agent_write_base_url(&provider.base_url, &provider.protocol)),
+    );
+    block.insert("wire_api".into(), Value::String("responses".into()));
+    // Provider-scoped key; leave auth.json alone (scheme B / cc-switch preserve path).
+    block.insert(
+        "experimental_bearer_token".into(),
+        Value::String(api_key),
+    );
+    block
 }
 
 fn write_toml_atomic(path: &std::path::Path, value: &Value) -> Result<()> {
@@ -155,4 +156,54 @@ fn write_toml_atomic(path: &std::path::Path, value: &Value) -> Result<()> {
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Provider;
+
+    #[test]
+    fn preserves_unknown_fields_in_existing_provider_block() {
+        let provider = Provider {
+            id: "prov_1".into(),
+            name: "Welfare".into(),
+            base_url: "https://welfare.example.com".into(),
+            protocol: Protocol::OpenaiResponses,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_1".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        let existing = toml::toml! {
+            base_url = "https://old.example.com/v1"
+            wire_api = "responses"
+            custom_flag = true
+            [http_headers]
+            "X-Native" = "keep"
+        };
+
+        let merged = merge_provider_block(Some(&existing), &provider, "secret".into());
+
+        assert_eq!(merged.get("custom_flag").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            merged
+                .get("http_headers")
+                .and_then(Value::as_table)
+                .and_then(|t| t.get("X-Native"))
+                .and_then(Value::as_str),
+            Some("keep")
+        );
+        assert_eq!(
+            merged.get("base_url").and_then(Value::as_str),
+            Some("https://welfare.example.com/v1")
+        );
+        assert_eq!(
+            merged
+                .get("experimental_bearer_token")
+                .and_then(Value::as_str),
+            Some("secret")
+        );
+    }
 }

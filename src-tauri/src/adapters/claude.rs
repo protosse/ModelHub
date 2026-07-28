@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::backup_before_write;
+use crate::backup::new_stamp;
 use super::util::{ensure_object, read_json_value, remove_path, set_string_path, write_json_value};
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
@@ -18,7 +19,8 @@ pub fn apply(
     keep: u32,
 ) -> Result<ApplyAgentResult> {
     let file = Paths::claude_settings(&config.paths)?;
-    backup_before_write(paths, "claude", &file, keep)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "claude", &file, keep, &stamp)?;
 
     let mut root = read_json_value(&file)?;
     let obj = ensure_object(&mut root)?;

@@ -175,8 +175,8 @@ fn live_opencode(config: &AppConfig, store: &Store) -> Result<OpencodeBinding> {
     };
 
     let providers_map = root.get("provider").and_then(|v| v.as_object());
-    let base = providers_map
-        .and_then(|m| m.get(&slug))
+    let provider_block = providers_map.and_then(|m| m.get(&slug));
+    let base = provider_block
         .and_then(|p| {
             p.pointer("/options/baseURL")
                 .or_else(|| p.pointer("/options/baseUrl"))
@@ -184,14 +184,17 @@ fn live_opencode(config: &AppConfig, store: &Store) -> Result<OpencodeBinding> {
         })
         .unwrap_or("")
         .to_string();
-    let protocol = providers_map
-        .and_then(|m| m.get(&slug))
+    let protocol = provider_block
         .and_then(|p| p.get("npm"))
         .and_then(|v| v.as_str())
         .map(protocol_from_npm)
         .unwrap_or(Protocol::OpenaiCompletions);
 
-    let (provider_id, model_id) = if !base.is_empty() {
+    let (provider_id, model_id) = if let Some(matched) =
+        match_managed_provider_model(store, provider_block, &upstream)
+    {
+        matched
+    } else if !base.is_empty() {
         match_provider_model(
             store,
             &base,
@@ -274,6 +277,7 @@ fn live_pi(config: &AppConfig, store: &Store) -> Result<PiBinding> {
 
     let mut base = String::new();
     let mut protocol = Protocol::OpenaiCompletions;
+    let mut provider_block = None;
     if models_file.exists() {
         if let Ok(root) = read_json_value(&models_file) {
             if let Some(p) = root
@@ -281,6 +285,7 @@ fn live_pi(config: &AppConfig, store: &Store) -> Result<PiBinding> {
                 .and_then(|v| v.as_object())
                 .and_then(|m| m.get(&def_p))
             {
+                provider_block = Some(p.clone());
                 base = p
                     .get("baseUrl")
                     .or_else(|| p.get("baseURL"))
@@ -296,7 +301,13 @@ fn live_pi(config: &AppConfig, store: &Store) -> Result<PiBinding> {
         }
     }
 
-    let (provider_id, model_id) = if !base.is_empty() {
+    let (provider_id, model_id) = if let Some(matched) = match_managed_provider_model(
+        store,
+        provider_block.as_ref(),
+        &def_m,
+    ) {
+        matched
+    } else if !base.is_empty() {
         match_provider_model(
             store,
             &base,
@@ -312,6 +323,28 @@ fn live_pi(config: &AppConfig, store: &Store) -> Result<PiBinding> {
         provider_id,
         model_id,
     })
+}
+
+fn match_managed_provider_model(
+    store: &Store,
+    provider_block: Option<&Value>,
+    upstream_model: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let provider_id = provider_block?
+        .get("_modelhub")?
+        .get("providerId")?
+        .as_str()?;
+    let provider = store.providers.iter().find(|p| p.id == provider_id)?;
+    let model_id = if upstream_model.is_empty() {
+        None
+    } else {
+        store
+            .models
+            .iter()
+            .find(|m| m.provider_id == provider.id && m.model_id == upstream_model)
+            .map(|m| m.id.clone())
+    };
+    Some((Some(provider.id.clone()), model_id))
 }
 
 fn match_provider_model(
@@ -401,5 +434,44 @@ fn protocol_from_api(api: &str) -> Protocol {
         "anthropic-messages" => Protocol::AnthropicMessages,
         "openai-responses" => Protocol::OpenaiResponses,
         _ => Protocol::OpenaiCompletions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Model, Provider};
+    use serde_json::json;
+
+    #[test]
+    fn managed_provider_id_restores_binding_even_when_disk_url_has_v1() {
+        let mut store = Store::default();
+        store.providers.push(Provider {
+            id: "prov_1".into(),
+            name: "baqi".into(),
+            base_url: "https://ai.example.com".into(),
+            protocol: Protocol::OpenaiCompletions,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_1".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+        store.models.push(Model {
+            id: "mdl_1".into(),
+            provider_id: "prov_1".into(),
+            model_id: "glm-test".into(),
+            display_name: "GLM Test".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+        let disk_block = json!({
+            "baseUrl": "https://ai.example.com/v1",
+            "_modelhub": { "managed": true, "providerId": "prov_1" }
+        });
+
+        let matched = match_managed_provider_model(&store, Some(&disk_block), "glm-test");
+
+        assert_eq!(matched, Some((Some("prov_1".into()), Some("mdl_1".into()))));
     }
 }

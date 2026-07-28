@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tauri": "bash scripts/dev.sh",
+    "dev:check": "bash scripts/dev.sh --check",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -74,6 +74,18 @@ pub fn find_existing_provider_entry<'a>(
         })
 }
 
+pub fn is_modelhub_managed_provider(value: &Value) -> bool {
+    value
+        .get("_modelhub")
+        .and_then(|v| v.get("managed"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+pub fn retain_unmanaged_provider_entries(providers: &mut Map<String, Value>) {
+    providers.retain(|_, value| !is_modelhub_managed_provider(value));
+}
+
 pub fn set_string_path(obj: &mut serde_json::Map<String, Value>, path: &[&str], val: String) {
     if path.is_empty() {
         return;
@@ -128,5 +140,21 @@ mod tests {
 
         assert_eq!(key, "old-slug");
         assert_eq!(value["custom"], "preserve-me");
+    }
+
+    #[test]
+    fn cleanup_removes_only_modelhub_managed_provider_blocks() {
+        let mut providers = json!({
+            "managed": { "_modelhub": { "managed": true } },
+            "native": { "headers": { "X-Native": "keep" } }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        retain_unmanaged_provider_entries(&mut providers);
+
+        assert!(!providers.contains_key("managed"));
+        assert_eq!(providers["native"]["headers"]["X-Native"], "keep");
     }
 }

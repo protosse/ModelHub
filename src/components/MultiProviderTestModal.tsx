@@ -573,14 +573,14 @@ export function MultiProviderTestModal({
           <div className="space-y-1.5">
             <p className="text-[11px] leading-relaxed text-ink-3">
               每个请求已按协议自动附加（{protocolAutoHeadersSummary()}）。
-              下方为整轮全局覆盖，会叠在协议默认与 Provider headers 之上；混测时同名头对所有模型生效。
+              下方为整轮全局覆盖，会叠在协议默认请求头之上；混测时同名头对所有模型生效。
             </p>
             <textarea
               className="input min-h-[72px] w-full resize-y font-mono text-xs"
               value={headersText}
               disabled={busy}
               onChange={(e) => setHeadersText(e.target.value)}
-              placeholder={"# 可选全局覆盖，例如：\nUser-Agent: openai-node"}
+              placeholder={"# 可选全局覆盖，例如：\nUser-Agent: codex_cli_rs/0.144.4"}
               spellCheck={false}
             />
           </div>
