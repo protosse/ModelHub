@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::util::read_json_value;
+use super::util::{find_existing_provider_entry, read_json_value};
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
     assign_catalog_write_keys, find_provider, resolve_upstream_model_id, AgentMode, AppConfig,
@@ -335,6 +335,16 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
     for (p, models) in &enabled {
         let key = key_map.get(&p.id).cloned().unwrap_or_default();
         write_keys.insert(key.clone());
+        let matched = find_existing_provider_entry(&existing, &p.id, &key);
+        if let Some((disk_key, _)) = matched {
+            write_keys.insert(disk_key.to_string());
+            if disk_key != key {
+                lines.push(DiffLine {
+                    kind: "change".into(),
+                    text: format!("~ provider key `{disk_key}` → `{key}`（保留原有扩展配置）"),
+                });
+            }
+        }
         lines.push(DiffLine {
             kind: "same".into(),
             text: format!(
@@ -345,8 +355,8 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
             ),
         });
         // Disk model ids for this provider block: `provider[key].models` keys.
-        let disk_ids: std::collections::HashSet<String> = existing
-            .get(&key)
+        let disk_ids: std::collections::HashSet<String> = matched
+            .map(|(_, value)| value)
             .and_then(|v| v.get("models"))
             .and_then(|v| v.as_object())
             .map(|m| m.keys().cloned().collect())
@@ -359,7 +369,7 @@ fn preview_opencode(svc: &StoreService, config: &AppConfig, store: &Store) -> Re
         agent: "opencode".into(),
         file: file.display().to_string(),
         lines,
-        note: "完全覆盖 provider 配置：只保留同步目录的 Provider，其余全部删除；mcp/plugin 等其它字段不动".into(),
+        note: "同步目录控制 provider 范围；匹配 Provider/模型保留原有扩展配置，目录外 Provider 删除；mcp/plugin 等其它字段不动".into(),
     })
 }
 
@@ -455,6 +465,16 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
     for (p, models) in &enabled {
         let key = key_map.get(&p.id).cloned().unwrap_or_default();
         write_keys.insert(key.clone());
+        let matched = find_existing_provider_entry(&existing, &p.id, &key);
+        if let Some((disk_key, _)) = matched {
+            write_keys.insert(disk_key.to_string());
+            if disk_key != key {
+                lines.push(DiffLine {
+                    kind: "change".into(),
+                    text: format!("~ provider key `{disk_key}` → `{key}`（保留原有扩展配置）"),
+                });
+            }
+        }
         lines.push(DiffLine {
             kind: "same".into(),
             text: format!(
@@ -465,8 +485,8 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
             ),
         });
         // Model-level diff: disk block stores models as an array of {id, ...}.
-        let disk_ids: std::collections::HashSet<String> = existing
-            .get(&key)
+        let disk_ids: std::collections::HashSet<String> = matched
+            .map(|(_, value)| value)
             .and_then(|v| v.get("models"))
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -487,7 +507,7 @@ fn preview_pi(svc: &StoreService, config: &AppConfig, store: &Store) -> Result<A
             settings_file.display()
         ),
         lines,
-        note: "完全覆盖 providers：只保留同步目录的 Provider，其余全部删除；defaultProvider 优先复用磁盘已有 key".into(),
+        note: "同步目录控制 providers 范围；匹配 Provider/模型保留原有 compat 等扩展配置，目录外 Provider 删除".into(),
     })
 }
 
@@ -516,8 +536,8 @@ fn push_model_diff_lines(
     removed.sort();
     for id in removed {
         lines.push(DiffLine {
-            kind: "same".into(),
-            text: format!("  · 模型 {id}（磁盘上有，本次不再同步）"),
+            kind: "remove".into(),
+            text: format!("  - 模型 {id}（不再同步 → 将删除）"),
         });
     }
 }
@@ -568,3 +588,19 @@ fn chg(field: &str, old: &str, new: &str) -> DiffLine {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_removed_from_catalog_is_a_real_preview_change() {
+        let disk_ids = std::collections::HashSet::from(["removed-model".to_string()]);
+        let mut lines = Vec::new();
+
+        push_model_diff_lines(&mut lines, &disk_ids, &[]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].kind, "remove");
+        assert!(lines[0].text.contains("removed-model"));
+    }
+}

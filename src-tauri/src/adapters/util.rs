@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::Path;
 
 pub fn read_json_value(path: &Path) -> Result<Value> {
@@ -45,9 +45,33 @@ pub fn ensure_object<'a>(value: &'a mut Value) -> Result<&'a mut serde_json::Map
     if !value.is_object() {
         *value = Value::Object(serde_json::Map::new());
     }
-    value
-        .as_object_mut()
-        .context("expected JSON object")
+    value.as_object_mut().context("expected JSON object")
+}
+
+/// Find the on-disk provider block that corresponds to a ModelHub provider.
+/// Prefer the stable managed id so provider renames (and therefore slug changes)
+/// can still inherit native settings; fall back to the key we are about to
+/// write for legacy/unmanaged blocks.
+pub fn find_existing_provider_entry<'a>(
+    providers: &'a Map<String, Value>,
+    provider_id: &str,
+    target_key: &str,
+) -> Option<(&'a str, &'a Value)> {
+    providers
+        .iter()
+        .find(|(_, value)| {
+            value
+                .get("_modelhub")
+                .and_then(|v| v.get("providerId"))
+                .and_then(Value::as_str)
+                == Some(provider_id)
+        })
+        .map(|(key, value)| (key.as_str(), value))
+        .or_else(|| {
+            providers
+                .get_key_value(target_key)
+                .map(|(key, value)| (key.as_str(), value))
+        })
 }
 
 pub fn set_string_path(obj: &mut serde_json::Map<String, Value>, path: &[&str], val: String) {
@@ -81,5 +105,28 @@ pub fn remove_path(obj: &mut serde_json::Map<String, Value>, path: &[&str]) {
     }
     if let Some(Value::Object(map)) = obj.get_mut(path[0]) {
         remove_path(map, &path[1..]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn provider_match_prefers_stable_modelhub_id_before_target_key() {
+        let providers = json!({
+            "old-slug": {
+                "_modelhub": { "providerId": "prov_1" },
+                "custom": "preserve-me"
+            },
+            "new-slug": { "custom": "wrong-block" }
+        });
+        let map = providers.as_object().unwrap();
+
+        let (key, value) = find_existing_provider_entry(map, "prov_1", "new-slug").unwrap();
+
+        assert_eq!(key, "old-slug");
+        assert_eq!(value["custom"], "preserve-me");
     }
 }

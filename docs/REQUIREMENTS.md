@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-28（对齐 `set_agent_catalog` 现行清理语义）
+> 最后更新：2026-07-28（OC/Pi 写出改为匹配项保留式合并）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -337,7 +337,8 @@ ModelHub 库（持久）
 - 密钥比较真实 token；相同则 unchanged  
 - 写出 Provider key 由 **Provider 名称 slug** 生成（名称全局唯一），写出集内去重（撞名加 `-2`）；**不复用磁盘已有 key**。同一 baseUrl 不同协议的两个 Provider（如 `jianzhile` responses + `jianzhile-cc` anthropic）各得独立 key，不再串块/互相覆盖。Apply 与 Preview 用同一份 key 映射，Diff 与实际写出一致  
 - **OC/Pi 模型级 Diff**：对每个同步 Provider，比对磁盘该块已有模型 id 与本次将写出的集合，逐条列出 `+ 新增模型` / `- 不再同步模型`（相同的省略）  
-- **OC/Pi 孤儿块**：磁盘上存在、但不在本次同步目录写出集里的 provider 块**一律标为「将删除」**（Apply 完全覆盖整个 provider 目录，见下），使 Diff 反映 Apply 后的完整状态  
+- **OC/Pi 匹配与保留**：写出 Provider 优先按 `_modelhub.providerId` 匹配磁盘原块（改名/slug 变化仍可继承），找不到时按本次目标 key 匹配。匹配项以磁盘原配置为基础重建：ModelHub 管理字段覆盖，Provider/模型的其它原生扩展字段保留
+- **OC/Pi 孤儿块**：磁盘上存在、但不在本次同步目录写出集且未被上述规则匹配的 provider 块**一律标为「将删除」**，使 Diff 反映 Apply 后的完整状态
 - **OC/Pi 默认模型条件写出**：Apply 仅在绑定草稿 provider+model **均已选** 时才写 OpenCode `model` / Pi `defaultProvider`+`defaultModel`；草稿未选默认时 **不改** 磁盘现值。Preview 与此对齐——草稿未选时该行显示磁盘现值为 unchanged，而非「→ —」的假变更  
 - **baseUrl `/v1` 规范化**：Apply 写出 OC/Pi 的 baseUrl 时，openai 系协议（completions / responses）自动补 `/v1`（已有则不重复），anthropic 保持裸 URL。与连通性测试的 `api_root` 及取模型行为一致——**测试能通过的模型 Apply 后也能用**（否则裸域名会打到中转站首页 HTML，pi 报 `Stream ended without finish_reason`）  
 
@@ -347,10 +348,10 @@ ModelHub 库（持久）
 |-------|------|
 | Claude | env + model；**不写** `_modelhub` |
 | Codex | `modelhub` 槽 + `experimental_bearer_token`；**不改** auth.json |
-| OpenCode | **完全覆盖** `provider` 目录：清空所有旧块，只写 **catalog(opencode)** + 默认 model；`mcp`/`plugin` 等其它顶层键不动 |
-| Pi | **完全覆盖** `providers` 目录：清空所有旧块，只写 **catalog(pi)** + defaultProvider/Model；settings 其它键不动；每块默认注入 `User-Agent: pi-coding-agent`（provider.headers 同名可覆盖） |
+| OpenCode | `provider` 目录成员由 **catalog(opencode)** 完整控制；匹配 Provider 保留原块、`options`、模型对象中的未知字段，ModelHub 覆盖 `npm` / 名称 / baseURL / 显式 headers / 同步模型集合 / `_modelhub`；`mcp`/`plugin` 等其它顶层键不动 |
+| Pi | `providers` 目录成员由 **catalog(pi)** 完整控制；匹配 Provider 保留原块及模型对象中的未知字段，`headers` / `compat` 按键合并（ModelHub 显式值覆盖），ModelHub 另覆盖 baseUrl / api / apiKey / authHeader / 模型 id·name·reasoning / `_modelhub`；settings 其它键不动；每块默认注入 `User-Agent: pi-coding-agent`（provider.headers 同名可覆盖） |
 
-> **OC/Pi 完全覆盖**：Apply 时 ModelHub 拥有整个 provider 目录——清空磁盘上**所有** provider 块（无论是否 ModelHub 写入），只重写同步目录中的 Provider。用户/其它工具手动加的块也会被清掉（既然都交给 ModelHub 管理）。写出块仍带 `_modelhub.managed` 元数据标记（供识别，不再影响清理范围）。OpenCode 的 `auth.json` 为追加式（只加不删），可能残留无用 key，无害。
+> **OC/Pi 目录范围覆盖 + 匹配项保留**：Apply 时 ModelHub 拥有整个 provider 目录的成员范围，只写同步目录中的 Provider；目录外用户/其它工具手动增加的块仍会被清掉。对于同步目录内且能按 `_modelhub.providerId` 或目标 key 匹配的磁盘块，会保留 ModelHub 未管理的 Provider/模型原生字段，避免 `compat`、上下文等 Agent 专属配置丢失。写出块带 `_modelhub.managed` 元数据标记。OpenCode 的 `auth.json` 为追加式（只加不删），可能残留无用 key，无害。
 
 ### 3.6 备份
 
@@ -567,3 +568,4 @@ src-tauri/src/
 | 2026-07-27 | 修复 OC/Pi Diff 幻影变化：Apply 仅当绑定草稿的默认 Provider+Model 都已选时才写 `model`/`defaultProvider`/`defaultModel`，未选则不碰磁盘；Preview 对齐此行为——草稿未选时默认模型行回退磁盘现值显示 unchanged，不再显示「→ —」的假变更（导致 Apply 后仍标「已更改」） |
 | 2026-07-27 | 修复「测试通过但 Apply 后请求失败」：OC/Pi 写出 baseUrl 对 **openai 系协议（completions/responses）自动补 `/v1`**（`agent_write_base_url`），与连通性测试 `api_root`、原生网关配置一致；anthropic 保持裸 URL。此前库中缺 `/v1` 的 Provider 测试走 `/v1` 能通、Apply 写裸 URL 打到网站首页 → `Stream ended without finish_reason`。另：Pi 写出块默认注入 `User-Agent: pi-coding-agent`（provider.headers 可覆盖） |
 | 2026-07-28 | 对齐 `set_agent_catalog` 现行清理语义：按 Provider 去重并去除悬空 Provider/模型引用，模型 ID 本身不额外去重。 |
+| 2026-07-28 | OC/Pi Apply 从“整块重新生成”改为“目录范围覆盖、匹配项保留式合并”：同步目录外 Provider 仍删除；同步目录内按 `_modelhub.providerId` 优先、目标 key 兜底匹配，保留 Provider/模型未知原生字段，Pi `headers` / `compat` 按键合并，ModelHub 管理字段继续覆盖。Preview 使用相同匹配规则。 |
