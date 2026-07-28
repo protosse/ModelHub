@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-27（分 Agent 同步目录含模型子集 + Agent 工作台合并页 + 移除 enabled 开关）  
+> 最后更新：2026-07-28（对齐 `set_agent_catalog` 现行清理语义）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -308,7 +308,7 @@ ModelHub 库（持久）
 - 仅 OC/Pi 详情显示；勾选 Provider / 展开选模型，**任何改动即调 `set_agent_catalog` 落盘并刷新库**  
 - **选模型子集**：Provider 行可展开其模型多选。全勾（= 全部）存空 `modelIds`（保持动态）；取消勾到 **零个模型 = 该 Provider 移出目录**（避免「空=全部」歧义）  
 - 搜索（名称子串）+ **Provider 全选仅作用当前搜索结果**（筛选外已勾保留，与提供商页同语义）  
-- 删除 Provider 时从两个 catalog 列表 scrub 掉该项；`set_agent_catalog` 落盘时去除悬空 provider / model id、去重、保序  
+- 删除 Provider 时从两个 catalog 列表 scrub 掉该项；`set_agent_catalog` 落盘时去除悬空 provider / model id、按 Provider 去重并保序（模型 ID 不额外去重）
 - **迁移**：旧 `store.json` 无 `agentCatalogs` 时，用当时 `enabled=true` 的 Provider 同时种子进 opencode/pi 两列表（`modelIds` 空 = 全部，行为与旧全局 `enabled` 一致）；一旦为 `Some`（即便空列表）不再重新种子。旧版 catalog 的裸 providerId 字符串仍可反序列化（→ 空模型子集 = 全部）  
 - **默认模型限定在同步目录内**：OC/Pi 的默认 Provider 只能从已加入 catalog 的 Provider 选  
 - **新建 / 克隆 Provider 自动加入两个 catalog**（空模型子集 = 全部）；catalog 尚为 `null`（未迁移）时不追加，留待首次 load 迁移种子  
@@ -417,7 +417,7 @@ ModelHub 库（持久）
 |------|------|
 | get_state | 库 + 路径 + 密钥遮罩 |
 | Provider/Model CRUD、clone、delete 批量 | 库维护（无 `set_provider_enabled`；`Model` 无 `enabled`） |
-| set_agent_catalog | 保存某 Agent（opencode/pi）同步目录 `CatalogEntry[]`（去重、去悬空 provider/model、单次落盘） |
+| set_agent_catalog | 保存某 Agent（opencode/pi）同步目录 `CatalogEntry[]`（按 Provider 去重、去悬空 provider/model；模型 ID 不额外去重；单次落盘） |
 | add_models | 批量添加模型（单次 load+save） |
 | delete_models | 批量删除模型（单次 load+save） |
 | fetch_provider_models | 远程模型列表 |
@@ -566,4 +566,4 @@ src-tauri/src/
 | 2026-07-27 | 修复移除 `enabled` 后的回归：**新建 / 克隆 Provider 自动加入 OC/Pi 两个同步目录**（空模型子集=全部），恢复「新增即默认同步」；catalog 未迁移（`null`）时不追加，留待首次 load 种子 |
 | 2026-07-27 | 修复 OC/Pi Diff 幻影变化：Apply 仅当绑定草稿的默认 Provider+Model 都已选时才写 `model`/`defaultProvider`/`defaultModel`，未选则不碰磁盘；Preview 对齐此行为——草稿未选时默认模型行回退磁盘现值显示 unchanged，不再显示「→ —」的假变更（导致 Apply 后仍标「已更改」） |
 | 2026-07-27 | 修复「测试通过但 Apply 后请求失败」：OC/Pi 写出 baseUrl 对 **openai 系协议（completions/responses）自动补 `/v1`**（`agent_write_base_url`），与连通性测试 `api_root`、原生网关配置一致；anthropic 保持裸 URL。此前库中缺 `/v1` 的 Provider 测试走 `/v1` 能通、Apply 写裸 URL 打到网站首页 → `Stream ended without finish_reason`。另：Pi 写出块默认注入 `User-Agent: pi-coding-agent`（provider.headers 可覆盖） |
-
+| 2026-07-28 | 对齐 `set_agent_catalog` 现行清理语义：按 Provider 去重并去除悬空 Provider/模型引用，模型 ID 本身不额外去重。 |
