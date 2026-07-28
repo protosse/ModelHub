@@ -202,7 +202,7 @@ export function ProvidersPage({
 
   return (
     <div className="grid h-full grid-cols-12 gap-4">
-      <section className="col-span-5 flex min-h-0 flex-col gap-3">
+      <section className="col-span-4 flex min-h-0 flex-col gap-3">
         <div className="flex items-center gap-2">
           <input
             className="input"
@@ -294,7 +294,7 @@ export function ProvidersPage({
         </div>
       </section>
 
-      <section className="col-span-7 min-h-0">
+      <section className="col-span-8 min-h-0">
         {selected ? (
           <ProviderDetail
             key={selected.id}
@@ -434,7 +434,7 @@ const ModelTestStatusBadge = memo(function ModelTestStatusBadge({
   }
   if (d.status === "ok") {
     return (
-      <span className="inline-flex items-center gap-1.5" title={tipBase}>
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={tipBase}>
         <span className="badge bg-ok/15 text-ok">成功</span>
         {latencyLabel ? (
           <span className="tabular-nums text-[11px] text-ink-3">{latencyLabel}</span>
@@ -444,7 +444,7 @@ const ModelTestStatusBadge = memo(function ModelTestStatusBadge({
   }
   if (d.status === "fail") {
     return (
-      <span className="inline-flex items-center gap-1.5" title={tipBase}>
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={tipBase}>
         <span className="badge bg-danger/20 text-danger">失败</span>
         {latencyLabel ? (
           <span className="tabular-nums text-[11px] text-ink-3">{latencyLabel}</span>
@@ -458,7 +458,7 @@ const ModelTestStatusBadge = memo(function ModelTestStatusBadge({
   // Fallback: disk last result when no active session status.
   if (!last) return <span className="text-xs text-ink-3">—</span>;
   return (
-    <span className="inline-flex items-center gap-1.5" title={tipBase}>
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={tipBase}>
       <span className={last.ok ? "badge bg-ok/15 text-ok" : "badge bg-danger/20 text-danger"}>
         {last.ok ? "成功" : "失败"}
       </span>
@@ -766,10 +766,10 @@ function ProviderDetail({
               <table className="w-full table-fixed text-left text-sm">
                 <colgroup>
                   <col className="w-[4%]" />
-                  <col className="w-[30%]" />
+                  <col className="w-[28%]" />
+                  <col className="w-[18%]" />
                   <col className="w-[22%]" />
-                  <col className="w-[14%]" />
-                  <col className="w-[30%]" />
+                  <col className="w-[28%]" />
                 </colgroup>
                 <thead className="text-xs text-ink-3">
                   <tr>
@@ -778,7 +778,7 @@ function ProviderDetail({
                     </th>
                     <th className="pb-2 pr-2 font-medium">Model ID</th>
                     <th className="pb-2 pr-2 font-medium">展示名</th>
-                    <th className="pb-2 font-medium">最近测试</th>
+                    <th className="pb-2 pr-2 font-medium">最近测试</th>
                     <th className="pb-2 font-medium" />
                   </tr>
                 </thead>
@@ -813,11 +813,11 @@ function ProviderDetail({
                         <td className="truncate py-2 pr-2" title={m.displayName}>
                           {m.displayName}
                         </td>
-                        <td className="py-2">
+                        <td className="whitespace-nowrap py-2 pr-2">
                           <ModelTestStatusBadge modelId={m.id} active={active} />
                         </td>
                         <td className="py-2 text-right">
-                          <div className="flex justify-end gap-1">
+                          <div className="flex flex-nowrap justify-end gap-1">
                             <button
                               type="button"
                               className="btn-secondary !px-2 !py-1 text-xs"
