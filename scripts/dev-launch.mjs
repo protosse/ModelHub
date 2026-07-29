@@ -8,6 +8,7 @@
  *   pnpm dev:tauri
  *   pnpm dev:tauri -- --port 1431
  *   pnpm dev:check
+ *   scripts\\dev.cmd   (Windows CMD)
  */
 import { spawn } from "node:child_process";
 import path from "node:path";

@@ -12,6 +12,7 @@
 #   .\scripts\dev.ps1 --check
 #   .\scripts\dev.ps1 --port 1431
 #   pnpm run dev:tauri
+#   scripts\dev.cmd
 #
 # 环境变量：
 #   MODELHUB_DEV_PORT / TAURI_DEV_PORT   首选前端端口（默认 1420）
@@ -20,7 +21,7 @@
 #Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
 $OnlyPrepare = if ($env:ONLY_PREPARE -eq "1") { $true } else { $false }
@@ -47,8 +48,8 @@ ModelHub 开发启动脚本（Windows）
 流程：
   1. 检查 node / pnpm / cargo
   2. 必要时 pnpm install
-  3. 选择空闲前端端口（默认 1420；占用则 1421…）
-  4. pnpm tauri dev（同步 Vite MODELHUB_DEV_PORT + tauri --config devUrl）
+  3. node scripts/ensure-dev-port.mjs 选空闲端口（默认 1420；占用则顺延，不杀进程）
+  4. pnpm tauri dev（MODELHUB_DEV_PORT + tauri --config 覆盖 devUrl / beforeDevCommand）
 
 环境变量：
   MODELHUB_DEV_PORT / TAURI_DEV_PORT   首选端口
@@ -134,25 +135,6 @@ function Test-Command([string]$Name) {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-# TCP 端口是否已被监听（尝试连接成功 = 占用）
-function Test-PortInUse([int]$Port) {
-  try {
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-      # 短超时，避免卡住
-      $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
-      $ok = $iar.AsyncWaitHandle.WaitOne(200, $false)
-      if (-not $ok) { return $false }
-      $client.EndConnect($iar)
-      return $true
-    } finally {
-      $client.Close()
-    }
-  } catch {
-    return $false
-  }
-}
-
 function Get-PortOwner([int]$Port) {
   try {
     $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -168,26 +150,44 @@ function Get-PortOwner([int]$Port) {
   }
 }
 
-function Select-DevPort([int]$Start, [int]$MaxTries = 40) {
-  $needHmr = -not [string]::IsNullOrEmpty($env:TAURI_DEV_HOST)
+# 通过 ensure-dev-port.mjs 选端口（双栈探测；stdout=端口，stderr=诊断）
+function Select-DevPortViaNode([int]$Start) {
   if ($Start -lt 1 -or $Start -gt 65535) {
     Die "无效端口：$Start（期望 1–65535）"
   }
+  $picker = Join-Path $PSScriptRoot "ensure-dev-port.mjs"
+  if (-not (Test-Path $picker)) {
+    Die "缺少 $picker"
+  }
 
-  $p = $Start
-  for ($n = 0; $n -lt $MaxTries; $n++) {
-    if ($p -gt 65534) { break }
-    if (-not (Test-PortInUse $p)) {
-      if (-not $needHmr -or -not (Test-PortInUse ($p + 1))) {
-        return $p
+  $stdoutFile = [System.IO.Path]::GetTempFileName()
+  $stderrFile = [System.IO.Path]::GetTempFileName()
+  try {
+    $proc = Start-Process -FilePath "node" -ArgumentList @($picker, "$Start") -WorkingDirectory $Root -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+    $code = $proc.ExitCode
+    $outText = (Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
+    $errText = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
+    if ($errText) {
+      foreach ($line in ($errText -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) { Write-Dim $line }
       }
     }
-    $p++
+    if ($code -ne 0) {
+      Die "ensure-dev-port.mjs 失败 (exit $code)"
+    }
+    $portStr = ([string]$outText).Trim()
+    if ($portStr -notmatch '^\d+$') {
+      Die "ensure-dev-port.mjs 未返回端口（得到: $portStr）"
+    }
+    return [int]$portStr
+  } finally {
+    Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
   }
-  Die "在 $Start 起连续 $MaxTries 个端口均不可用（含 HMR 需求时还需 port+1）"
 }
 
 # 解析首选端口为 int
+
 try {
   $PreferredPortInt = [int]$PreferredPort
 } catch {
@@ -271,21 +271,17 @@ if ($TauriV) {
   Die "Tauri CLI 不可用（pnpm exec tauri --version 失败）"
 }
 
-# ── 3. free dev port ──────────────────────────────────
+# ── 3. free dev port（不杀进程；Node 双栈探测）────────
 Write-Log "Pick dev port"
-if (Test-PortInUse $PreferredPortInt) {
-  $owner = Get-PortOwner $PreferredPortInt
-  if ($owner) {
-    Write-WarnMsg "端口 $PreferredPortInt 已被占用："
-    foreach ($line in ($owner -split "`n")) {
-      Write-Dim $line
-    }
-  } else {
-    Write-WarnMsg "端口 $PreferredPortInt 已被占用"
+$owner = Get-PortOwner $PreferredPortInt
+if ($owner) {
+  Write-WarnMsg "端口 $PreferredPortInt 已被占用（保留对方进程，改用下一空闲口）："
+  foreach ($line in ($owner -split "`n")) {
+    Write-Dim $line
   }
 }
 
-$DevPort = Select-DevPort $PreferredPortInt
+$DevPort = Select-DevPortViaNode $PreferredPortInt
 if ($DevPort -ne $PreferredPortInt) {
   Write-WarnMsg "改用端口 $DevPort"
 } else {
@@ -296,7 +292,6 @@ $HmrPort = $DevPort + 1
 if (-not [string]::IsNullOrEmpty($env:TAURI_DEV_HOST)) {
   Write-Ok "HMR port: $HmrPort (TAURI_DEV_HOST=$($env:TAURI_DEV_HOST))"
 }
-
 $env:MODELHUB_DEV_PORT = "$DevPort"
 $env:MODELHUB_HMR_PORT = "$HmrPort"
 $env:TAURI_DEV_PORT = "$DevPort"
@@ -307,11 +302,14 @@ if ($OnlyPrepare) {
   exit 0
 }
 
-# 用临时 JSON 覆盖 tauri.conf.json 的 devUrl，避免 PowerShell 引号地狱
+# 用临时 JSON 覆盖 tauri.conf.json 的 devUrl + beforeDevCommand。
+# 显式 --port，避免 beforeDevCommand 子进程未继承 MODELHUB_DEV_PORT 时仍钉死 1420。
 $TauriDevConfigPath = Join-Path $env:TEMP "modelhub-tauri-dev-$DevPort.json"
+$ViteCmd = "pnpm exec vite --port $DevPort --strictPort"
 $TauriDevConfigObj = @{
   build = @{
     devUrl = "http://localhost:$DevPort"
+    beforeDevCommand = $ViteCmd
   }
 }
 # PS 5.1 无 utf8NoBOM；统一用无 BOM UTF-8，避免 tauri 解析 BOM 失败
