@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentBindings,
-  AppConfig,
   ApplyResult,
   BackupEntry,
   RestoreBackupResult,
@@ -25,8 +24,8 @@ export async function getState(): Promise<FullState> {
   return invoke<FullState>("get_state");
 }
 
-export async function saveAppConfig(config: AppConfig): Promise<void> {
-  return invoke("save_app_config", { config });
+export async function setBackupKeepCount(backupKeepCount: number): Promise<void> {
+  return invoke("set_backup_keep_count", { backupKeepCount });
 }
 
 export async function addProvider(input: ProviderInput): Promise<Provider> {

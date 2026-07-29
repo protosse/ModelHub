@@ -3,6 +3,8 @@ use fs_err as fs;
 use serde_json::{Map, Value};
 use std::path::Path;
 
+use crate::file_io::write_atomic;
+
 pub fn read_json_value(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -20,11 +22,8 @@ pub fn write_json_value(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
     let text = serde_json::to_string_pretty(value)?;
-    fs::write(&tmp, format!("{text}\n"))?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    write_atomic(path, format!("{text}\n").as_bytes())
 }
 
 pub fn strip_json_line_comments(input: &str) -> String {

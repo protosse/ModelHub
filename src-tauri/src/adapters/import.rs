@@ -352,9 +352,7 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
     let mut items = Vec::new();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for c in &candidates {
-        *name_counts
-            .entry(c.name.to_lowercase())
-            .or_insert(0) += 1;
+        *name_counts.entry(c.name.to_lowercase()).or_insert(0) += 1;
     }
 
     for c in candidates {
@@ -365,7 +363,11 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
                 .as_ref()
                 .map(|(_, n)| n.to_lowercase() != c.name.to_lowercase())
                 .unwrap_or(true);
-        let batch_dup = name_counts.get(&c.name.to_lowercase()).copied().unwrap_or(0) > 1;
+        let batch_dup = name_counts
+            .get(&c.name.to_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1;
 
         let model_ids: Vec<String> = c.models.iter().map(|(id, _)| id.clone()).collect();
         let (new_model_ids, existing_model_ids, extra_model_count) =
@@ -409,7 +411,7 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
         });
     }
 
-        items.sort_by(|a, b| {
+    items.sort_by(|a, b| {
         let score = |it: &ImportPreviewItem| -> i32 {
             if !it.already_exists && it.has_api_key {
                 0
@@ -426,10 +428,7 @@ pub fn preview_import(svc: &StoreService, config: &AppConfig) -> Result<ImportPr
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    Ok(ImportPreview {
-        items,
-        scan_notes,
-    })
+    Ok(ImportPreview { items, scan_notes })
 }
 
 pub fn import_from_agents(
@@ -498,11 +497,10 @@ pub fn import_from_agents(
             ImportAction::Import | ImportAction::Override => {}
         }
 
-        let endpoint = d
-            .id
-            .strip_prefix("ep|")
-            .unwrap_or(d.id.as_str())
-            .to_string();
+        let endpoint =
+            d.id.strip_prefix("ep|")
+                .unwrap_or(d.id.as_str())
+                .to_string();
         let Some(c) = by_endpoint.get(&endpoint) else {
             skipped += 1;
             continue;
@@ -632,12 +630,13 @@ pub fn import_from_agents(
         }
     }
 
-    if secrets_dirty {
-        svc.save_secrets(&secrets)?;
-    }
     // Always persist store after a successful batch (even if only counters moved).
     if imported_providers > 0 || imported_models > 0 || overridden > 0 {
-        svc.save_store(&store)?;
+        if secrets_dirty {
+            svc.save_store_and_secrets(&store, &secrets)?;
+        } else {
+            svc.save_store(&store)?;
+        }
     }
 
     Ok(ImportResult {

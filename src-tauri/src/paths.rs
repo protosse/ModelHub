@@ -89,14 +89,10 @@ impl ModelHubPaths {
         if let Some(p) = &overrides.pi_settings {
             return Ok(PathBuf::from(p));
         }
-        Ok(Self::home()?.join(".pi").join("agent").join("settings.json"))
-    }
-
-    pub fn pi_auth(overrides: &PathOverrides) -> Result<PathBuf> {
-        if let Some(p) = &overrides.pi_auth {
-            return Ok(PathBuf::from(p));
-        }
-        Ok(Self::home()?.join(".pi").join("agent").join("auth.json"))
+        Ok(Self::home()?
+            .join(".pi")
+            .join("agent")
+            .join("settings.json"))
     }
 
     pub fn detect(&self, overrides: &PathOverrides) -> Result<DetectedPaths> {

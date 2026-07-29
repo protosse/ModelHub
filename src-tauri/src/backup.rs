@@ -3,6 +3,7 @@ use chrono::Utc;
 use fs_err as fs;
 use std::path::{Path, PathBuf};
 
+use crate::file_io::write_atomic;
 use crate::paths::ModelHubPaths;
 use crate::store::AppConfig;
 
@@ -50,7 +51,7 @@ fn rotate_backups(agent_dir: &Path, keep: u32) -> Result<()> {
     }
     let remove_count = entries.len() - keep;
     for e in entries.into_iter().take(remove_count) {
-        let _ = fs::remove_dir_all(e.path());
+        fs::remove_dir_all(e.path())?;
     }
     Ok(())
 }
@@ -154,9 +155,7 @@ fn resolve_restore_target(
         "opencode" => match file_name {
             // Main config may have been backed up as .json or .jsonc; always
             // restore onto the currently detected live path.
-            "opencode.json" | "opencode.jsonc" => {
-                Some(ModelHubPaths::opencode_config(overrides)?)
-            }
+            "opencode.json" | "opencode.jsonc" => Some(ModelHubPaths::opencode_config(overrides)?),
             "auth.json" => Some(ModelHubPaths::opencode_auth(overrides)?),
             _ => None,
         },
@@ -172,34 +171,6 @@ fn resolve_restore_target(
 
 fn restart_required_for(agent: &str) -> bool {
     matches!(agent, "claude" | "codex")
-}
-
-pub fn restore_file(backup_path: &Path, target: &Path) -> Result<()> {
-    if !backup_path.exists() {
-        bail!("backup file not found");
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Use a unique temp name so concurrent restores / odd extensions don't clash.
-    let tmp = target.with_extension(format!(
-        "restore-tmp-{}",
-        Utc::now().format("%Y%m%d%H%M%S%3f")
-    ));
-    fs::copy(backup_path, &tmp).with_context(|| {
-        format!(
-            "copy backup {} → temp {}",
-            backup_path.display(),
-            tmp.display()
-        )
-    })?;
-    fs::rename(&tmp, target).with_context(|| {
-        format!(
-            "replace {} with restored content",
-            target.display()
-        )
-    })?;
-    Ok(())
 }
 
 /// Restore one backup snapshot (agent + stamp) onto current live Agent paths.
@@ -235,7 +206,9 @@ pub fn restore_snapshot(
         bail!("backup snapshot is empty: {agent}/{stamp}");
     }
 
-    let mut plan: Vec<(PathBuf, PathBuf, String)> = Vec::new(); // (src, dest, name)
+    // Read sources before creating the safety snapshot: rotation may remove the
+    // oldest directory, including the snapshot currently being restored.
+    let mut plan: Vec<(Vec<u8>, PathBuf, String)> = Vec::new(); // (contents, dest, name)
     let mut skipped: Vec<String> = Vec::new();
 
     for src in &backup_files {
@@ -244,7 +217,11 @@ pub fn restore_snapshot(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         match resolve_restore_target(agent, &name, config)? {
-            Some(dest) => plan.push((src.clone(), dest, name)),
+            Some(dest) => {
+                let contents =
+                    fs::read(src).with_context(|| format!("read backup {}", src.display()))?;
+                plan.push((contents, dest, name));
+            }
             None => skipped.push(name),
         }
     }
@@ -278,25 +255,18 @@ pub fn restore_snapshot(
     };
 
     let mut restored: Vec<String> = Vec::new();
-    for (src, dest, _name) in &plan {
-        restore_file(src, dest)?;
+    for (contents, dest, _name) in &plan {
+        write_atomic(dest, contents)?;
         restored.push(dest.display().to_string());
     }
 
     let restart_required = restart_required_for(agent);
-    let mut message = format!(
-        "已恢复 {} 个文件到 {} 当前配置路径",
-        restored.len(),
-        agent
-    );
+    let mut message = format!("已恢复 {} 个文件到 {} 当前配置路径", restored.len(), agent);
     if let Some(ref s) = safety_stamp_out {
         message.push_str(&format!("；恢复前已备份当前文件（{s}）"));
     }
     if !skipped.is_empty() {
-        message.push_str(&format!(
-            "；已跳过无法识别的文件：{}",
-            skipped.join(", ")
-        ));
+        message.push_str(&format!("；已跳过无法识别的文件：{}", skipped.join(", ")));
     }
     if restart_required {
         message.push_str("；建议重启对应 Agent 使配置生效");
@@ -318,7 +288,7 @@ mod tests {
     use super::*;
     use crate::store::PathOverrides;
     use std::fs;
-    
+
     fn cfg() -> AppConfig {
         AppConfig {
             backup_keep_count: 10,
@@ -335,11 +305,8 @@ mod tests {
     }
 
     fn make_tmp(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "modelhub-backup-test-{}-{}",
-            label,
-            Uuidish::new()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("modelhub-backup-test-{}-{}", label, Uuidish::new()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -429,5 +396,41 @@ mod tests {
         assert!(body.contains("new"));
         assert!(!res.restart_required);
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn restoring_oldest_snapshot_survives_safety_backup_rotation() {
+        let tmp = make_tmp("restore-oldest");
+        let paths = ModelHubPaths {
+            root: tmp.join(".modelhub"),
+        };
+        let live = tmp.join("live/settings.json");
+        fs::create_dir_all(live.parent().unwrap()).unwrap();
+        fs::write(&live, b"current").unwrap();
+
+        let oldest = "20000101-000000-000";
+        let newer = "20000102-000000-000";
+        for (stamp, body) in [(oldest, b"oldest".as_slice()), (newer, b"newer".as_slice())] {
+            let dir = paths.backups_dir().join("claude").join(stamp);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("settings.json"), body).unwrap();
+        }
+
+        let mut config = cfg();
+        config.backup_keep_count = 2;
+        config.paths.claude_settings = Some(live.display().to_string());
+
+        let result = restore_snapshot(&paths, &config, "claude", oldest).unwrap();
+
+        assert_eq!(fs::read(&live).unwrap(), b"oldest");
+        assert!(result.safety_stamp.is_some());
+        assert!(!paths.backups_dir().join("claude").join(oldest).exists());
+        assert_eq!(
+            fs::read_dir(paths.backups_dir().join("claude"))
+                .unwrap()
+                .count(),
+            2
+        );
+        fs::remove_dir_all(tmp).unwrap();
     }
 }

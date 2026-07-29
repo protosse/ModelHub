@@ -2,7 +2,7 @@ use crate::adapters;
 use crate::backup::{self, BackupEntry, RestoreBackupResult};
 use crate::paths::ModelHubPaths;
 use crate::store::{
-    AgentBindings, AppConfig, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
+    AgentBindings, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
     ImportRequest, ImportResult, Model, ModelInput, ModelTestResult, Provider, ProviderInput,
     RemoteModel, StoreService, TestConnectionRequest, TestConnectionResult, TestPrompt,
     TestPromptInput,
@@ -22,8 +22,10 @@ pub fn get_state() -> Result<FullState, String> {
 }
 
 #[tauri::command]
-pub fn save_app_config(config: AppConfig) -> Result<(), String> {
+pub fn set_backup_keep_count(backup_keep_count: u32) -> Result<(), String> {
     let (svc, _) = svc()?;
+    let mut config = svc.load_config().map_err(|e| e.to_string())?;
+    config.backup_keep_count = backup_keep_count;
     svc.save_config(&config).map_err(|e| e.to_string())
 }
 
@@ -46,7 +48,11 @@ pub fn delete_provider(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn clone_provider(id: String, new_name: String, new_api_key: String) -> Result<Provider, String> {
+pub fn clone_provider(
+    id: String,
+    new_name: String,
+    new_api_key: String,
+) -> Result<Provider, String> {
     let (svc, _) = svc()?;
     svc.clone_provider(&id, &new_name, &new_api_key)
         .map_err(|e| e.to_string())
@@ -80,12 +86,6 @@ pub fn delete_model(id: String) -> Result<(), String> {
 pub fn delete_models(ids: Vec<String>) -> Result<usize, String> {
     let (svc, _) = svc()?;
     svc.delete_models(&ids).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn save_bindings(bindings: AgentBindings) -> Result<(), String> {
-    let (svc, _) = svc()?;
-    svc.save_bindings(bindings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -129,13 +129,6 @@ pub fn run_import(request: ImportRequest) -> Result<ImportResult, String> {
 }
 
 #[tauri::command]
-pub fn list_provider_names() -> Result<Vec<String>, String> {
-    let (svc, _) = svc()?;
-    let store = svc.load_store().map_err(|e| e.to_string())?;
-    Ok(store.providers.into_iter().map(|p| p.name).collect())
-}
-
-#[tauri::command]
 pub fn list_backups() -> Result<Vec<BackupEntry>, String> {
     let (_, paths) = svc()?;
     backup::list_backups(&paths).map_err(|e| e.to_string())
@@ -176,12 +169,7 @@ pub fn set_agent_catalog(agent: String, entries: Vec<CatalogEntry>) -> Result<()
 #[tauri::command]
 pub fn delete_providers(ids: Vec<String>) -> Result<usize, String> {
     let (svc, _) = svc()?;
-    let mut n = 0usize;
-    for id in ids {
-        svc.delete_provider(&id).map_err(|e| e.to_string())?;
-        n += 1;
-    }
-    Ok(n)
+    svc.delete_providers(&ids).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

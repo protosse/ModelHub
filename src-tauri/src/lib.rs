@@ -1,6 +1,7 @@
 mod adapters;
 mod backup;
 mod commands;
+mod file_io;
 mod paths;
 mod store;
 
@@ -10,7 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
-            commands::save_app_config,
+            commands::set_backup_keep_count,
             commands::add_provider,
             commands::update_provider,
             commands::delete_provider,
@@ -20,7 +21,6 @@ pub fn run() {
             commands::update_model,
             commands::delete_model,
             commands::delete_models,
-            commands::save_bindings,
             commands::read_live_bindings,
             commands::apply_config,
             commands::preview_apply,

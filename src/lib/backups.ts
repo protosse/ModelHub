@@ -105,7 +105,18 @@ export function parseBackupStamp(stamp: string): Date | null {
       ms,
     ),
   );
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getUTCFullYear() !== Number(y) ||
+    date.getUTCMonth() !== Number(mo) - 1 ||
+    date.getUTCDate() !== Number(d) ||
+    date.getUTCHours() !== Number(h) ||
+    date.getUTCMinutes() !== Number(mi) ||
+    date.getUTCSeconds() !== Number(s)
+  ) {
+    return null;
+  }
+  return date;
 }
 
 export function formatBackupStamp(stamp: string): string {

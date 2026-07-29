@@ -50,6 +50,15 @@ impl Default for AppConfig {
     }
 }
 
+impl AppConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !(1..=50).contains(&self.backup_keep_count) {
+            anyhow::bail!("备份保留份数必须在 1–50 之间");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PathOverrides {
@@ -59,7 +68,6 @@ pub struct PathOverrides {
     pub opencode_auth: Option<String>,
     pub pi_models: Option<String>,
     pub pi_settings: Option<String>,
-    pub pi_auth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

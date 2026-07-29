@@ -1,10 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::util::{
-    find_existing_provider_entry, is_modelhub_managed_provider, read_json_value,
-};
+use super::util::{find_existing_provider_entry, is_modelhub_managed_provider, read_json_value};
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
@@ -63,11 +61,14 @@ pub fn preview_apply(
 fn preview_claude(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result<AgentDiff> {
     let file = Paths::claude_settings(&config.paths)?;
     let current = if file.exists() {
-        read_json_value(&file).unwrap_or(Value::Object(Default::default()))
+        read_json_value(&file)?
     } else {
         Value::Object(Default::default())
     };
-    let env = current.get("env").cloned().unwrap_or(Value::Object(Default::default()));
+    let env = current
+        .get("env")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     let cur_base = env
         .get("ANTHROPIC_BASE_URL")
         .and_then(|v| v.as_str())
@@ -169,9 +170,15 @@ fn preview_claude(config: &AppConfig, store: &Store, secrets: &Secrets) -> Resul
 
 fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result<AgentDiff> {
     let file = Paths::codex_config(&config.paths)?;
-    let (cur_provider, cur_model, cur_base) = if file.exists() {
-        let text = fs::read_to_string(&file).unwrap_or_default();
-        let val = text.parse::<toml::Value>().unwrap_or(toml::Value::Table(Default::default()));
+    let current = if file.exists() {
+        let text = fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+        text.parse::<toml::Value>()
+            .with_context(|| format!("parse {}", file.display()))?
+    } else {
+        toml::Value::Table(Default::default())
+    };
+    let (cur_provider, cur_model, cur_base) = {
+        let val = &current;
         let mp = val
             .get("model_provider")
             .and_then(|v| v.as_str())
@@ -190,8 +197,6 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
             .unwrap_or("")
             .to_string();
         (mp, model, base)
-    } else {
-        (String::new(), String::new(), String::new())
     };
 
     let mut lines = Vec::new();
@@ -222,21 +227,13 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
                 .and_then(|p| secrets.secrets.get(&p.secret_ref))
                 .map(|s| s.api_key.as_str())
                 .unwrap_or("");
-            let cur_token = if file.exists() {
-                let text = fs::read_to_string(&file).unwrap_or_default();
-                text.parse::<toml::Value>()
-                    .ok()
-                    .and_then(|v| {
-                        v.get("model_providers")
-                            .and_then(|p| p.get(key))
-                            .and_then(|b| b.get("experimental_bearer_token"))
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            let cur_token = current
+                .get("model_providers")
+                .and_then(|p| p.get(key))
+                .and_then(|b| b.get("experimental_bearer_token"))
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string();
 
             lines.push(chg("model_provider", &cur_provider, key));
             lines.push(chg("model", &cur_model, new_model));
@@ -262,7 +259,9 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
             } else if cur_token != new_key {
                 lines.push(DiffLine {
                     kind: "change".into(),
-                    text: format!("~ model_providers.{key}.experimental_bearer_token = *** (changed)"),
+                    text: format!(
+                        "~ model_providers.{key}.experimental_bearer_token = *** (changed)"
+                    ),
                 });
             } else {
                 lines.push(DiffLine {
@@ -290,12 +289,12 @@ fn preview_opencode(
     let file = Paths::opencode_config(&config.paths)?;
     let auth_file = Paths::opencode_auth(&config.paths)?;
     let current = if file.exists() {
-        read_json_value(&file).unwrap_or(Value::Object(Default::default()))
+        read_json_value(&file)?
     } else {
         Value::Object(Default::default())
     };
     let auth = if auth_file.exists() {
-        read_json_value(&auth_file).unwrap_or(Value::Object(Default::default()))
+        read_json_value(&auth_file)?
     } else {
         Value::Object(Default::default())
     };
@@ -317,9 +316,8 @@ fn preview_opencode(
         .cloned()
         .unwrap_or_default();
     // Same key map apply uses (name slug, de-duped) so preview matches disk.
-    let key_map = assign_catalog_write_keys(
-        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
-    );
+    let key_map =
+        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
     // Apply only writes `model` when BOTH provider and model are set; otherwise
     // leave disk value alone. Mirror that so an unset binding is not a phantom change.
     let active = match (
@@ -439,7 +437,7 @@ fn preview_pi(
     let models_file = Paths::pi_models(&config.paths)?;
     let settings_file = Paths::pi_settings(&config.paths)?;
     let settings = if settings_file.exists() {
-        read_json_value(&settings_file).unwrap_or(Value::Object(Default::default()))
+        read_json_value(&settings_file)?
     } else {
         Value::Object(Default::default())
     };
@@ -456,21 +454,17 @@ fn preview_pi(
 
     let enabled = svc.catalog_providers_with_models(store, "pi");
     let existing = if models_file.exists() {
-        read_json_value(&models_file)
-            .ok()
-            .and_then(|v| {
-                v.get("providers")
-                    .and_then(|p| p.as_object())
-                    .cloned()
-            })
+        read_json_value(&models_file)?
+            .get("providers")
+            .and_then(|p| p.as_object())
+            .cloned()
             .unwrap_or_default()
     } else {
         Default::default()
     };
     // Same key map apply uses (name slug, de-duped) so preview matches disk.
-    let key_map = assign_catalog_write_keys(
-        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
-    );
+    let key_map =
+        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
     // Apply only writes defaultProvider/defaultModel when BOTH are set in the
     // draft; otherwise it leaves the disk values untouched. Mirror that here so
     // an unset binding shows "unchanged" instead of a phantom "→ —" change.
@@ -621,7 +615,6 @@ fn push_orphan_block_lines(
     }
 }
 
-
 /// Resolve OpenCode's effective disk token for a catalog provider.
 /// Prefer auth.json under the disk key (or the target write key); fall back to
 /// legacy inline `options.apiKey` on the provider block (which Apply clears).
@@ -714,6 +707,7 @@ fn chg(field: &str, old: &str, new: &str) -> DiffLine {
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn model_removed_from_catalog_is_a_real_preview_change() {
@@ -770,5 +764,20 @@ mod tests {
             opencode_disk_token(&auth2, Some(&block), "old-slug", "new-slug"),
             "renamed-auth"
         );
+    }
+
+    #[test]
+    fn malformed_live_config_makes_preview_fail() {
+        let dir = std::env::temp_dir().join(format!("modelhub-preview-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        fs::write(&file, b"{not json").unwrap();
+        let mut config = AppConfig::default();
+        config.paths.claude_settings = Some(file.display().to_string());
+
+        let error = preview_claude(&config, &Store::default(), &Secrets::default()).unwrap_err();
+
+        assert!(error.to_string().contains("parse"));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

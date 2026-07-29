@@ -243,13 +243,6 @@ export function BackupsPage({ state, active = true, onToast }: Props) {
                       <button
                         type="button"
                         className="btn-ghost !px-2 !py-1 text-xs"
-                        onClick={() => void onCopy(snap.dirPath, "已复制快照目录")}
-                      >
-                        复制目录
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-ghost !px-2 !py-1 text-xs"
                         onClick={() => void onReveal(snap.files[0]?.path ?? snap.dirPath)}
                       >
                         打开位置

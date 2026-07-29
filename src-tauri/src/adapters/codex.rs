@@ -4,6 +4,7 @@ use toml::value::{Table, Value};
 
 use super::backup_before_write;
 use crate::backup::new_stamp;
+use crate::file_io::write_atomic;
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     agent_write_base_url, find_provider, resolve_upstream_model_id, AgentMode, AppConfig,
@@ -91,10 +92,7 @@ pub fn apply(
     }
 
     table.insert("model".into(), Value::String(model_id.clone()));
-    table.insert(
-        "model_provider".into(),
-        Value::String(provider_key.clone()),
-    );
+    table.insert("model_provider".into(), Value::String(provider_key.clone()));
 
     let providers = table
         .entry("model_providers".to_string())
@@ -140,10 +138,7 @@ fn merge_provider_block(
     );
     block.insert("wire_api".into(), Value::String("responses".into()));
     // Provider-scoped key; leave auth.json alone (scheme B / cc-switch preserve path).
-    block.insert(
-        "experimental_bearer_token".into(),
-        Value::String(api_key),
-    );
+    block.insert("experimental_bearer_token".into(), Value::String(api_key));
     block
 }
 
@@ -152,10 +147,7 @@ fn write_toml_atomic(path: &std::path::Path, value: &Value) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let text = toml::to_string_pretty(value).context("serialize toml")?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    write_atomic(path, text.as_bytes())
 }
 
 #[cfg(test)]
@@ -186,7 +178,10 @@ mod tests {
 
         let merged = merge_provider_block(Some(&existing), &provider, "secret".into());
 
-        assert_eq!(merged.get("custom_flag").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            merged.get("custom_flag").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             merged
                 .get("http_headers")

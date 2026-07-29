@@ -6,9 +6,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use fs_err as fs;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
+use crate::file_io::write_atomic;
 use crate::paths::ModelHubPaths;
 
 pub struct StoreService {
@@ -28,11 +29,14 @@ impl StoreService {
 
     pub fn load_config(&self) -> Result<AppConfig> {
         self.ensure_dirs()?;
-        read_json_or_default(&self.paths.config_file())
+        let config: AppConfig = read_json_or_default(&self.paths.config_file())?;
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn save_config(&self, config: &AppConfig) -> Result<()> {
         self.ensure_dirs()?;
+        config.validate()?;
         write_json_atomic(&self.paths.config_file(), config)
     }
 
@@ -80,6 +84,40 @@ impl StoreService {
             let mut perms = fs::metadata(&path)?.permissions();
             perms.set_mode(0o600);
             fs::set_permissions(&path, perms)?;
+        }
+        Ok(())
+    }
+
+    /// Commit Store and Secrets together. Secrets are written first so Store
+    /// never points at a key that has not been persisted; if the Store write
+    /// fails, restore the previous Secrets bytes.
+    pub fn save_store_and_secrets(&self, store: &Store, secrets: &Secrets) -> Result<()> {
+        self.ensure_dirs()?;
+        let secrets_path = self.paths.secrets_file();
+        let previous_secrets = if secrets_path.exists() {
+            Some(fs::read(&secrets_path)?)
+        } else {
+            None
+        };
+
+        self.save_secrets(secrets)?;
+        if let Err(store_error) = self.save_store(store) {
+            let rollback = match previous_secrets {
+                Some(bytes) => write_atomic(&secrets_path, &bytes),
+                None => {
+                    if secrets_path.exists() {
+                        fs::remove_file(&secrets_path).map_err(anyhow::Error::from)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(rollback_error) = rollback {
+                anyhow::bail!(
+                    "save store failed: {store_error}; secrets rollback also failed: {rollback_error}"
+                );
+            }
+            return Err(store_error);
         }
         Ok(())
     }
@@ -152,8 +190,7 @@ impl StoreService {
                 model_ids: Vec::new(),
             });
         }
-        self.save_secrets(&secrets)?;
-        self.save_store(&store)?;
+        self.save_store_and_secrets(&store, &secrets)?;
         Ok(provider)
     }
 
@@ -184,7 +221,8 @@ impl StoreService {
         provider.notes = input.notes;
         provider.updated_at = now.clone();
         let secret_ref = provider.secret_ref.clone();
-        if !input.api_key.is_empty() {
+        let secrets_changed = !input.api_key.is_empty();
+        if secrets_changed {
             secrets.secrets.insert(
                 secret_ref,
                 SecretEntry {
@@ -192,36 +230,66 @@ impl StoreService {
                     updated_at: now,
                 },
             );
-            self.save_secrets(&secrets)?;
         }
         let out = provider.clone();
-        self.save_store(&store)?;
+        if secrets_changed {
+            self.save_store_and_secrets(&store, &secrets)?;
+        } else {
+            self.save_store(&store)?;
+        }
         Ok(out)
     }
 
     pub fn delete_provider(&self, id: &str) -> Result<()> {
+        let n = self.delete_providers(&[id.to_string()])?;
+        if n == 0 {
+            anyhow::bail!("provider not found");
+        }
+        Ok(())
+    }
+
+    /// Batch-delete providers in one read/modify/write operation. Unknown ids
+    /// are ignored, matching `delete_models` behavior.
+    pub fn delete_providers(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
         let mut store = self.load_store()?;
         let mut secrets = self.load_secrets()?;
-        let Some(idx) = store.providers.iter().position(|p| p.id == id) else {
-            anyhow::bail!("provider not found");
-        };
-        let removed = store.providers.remove(idx);
-        secrets.secrets.remove(&removed.secret_ref);
+        let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let removed: Vec<Provider> = store
+            .providers
+            .iter()
+            .filter(|p| id_set.contains(p.id.as_str()))
+            .cloned()
+            .collect();
+        if removed.is_empty() {
+            return Ok(0);
+        }
+        let removed_ids: std::collections::HashSet<&str> =
+            removed.iter().map(|p| p.id.as_str()).collect();
         let removed_model_ids: Vec<String> = store
             .models
             .iter()
-            .filter(|m| m.provider_id == id)
+            .filter(|m| removed_ids.contains(m.provider_id.as_str()))
             .map(|m| m.id.clone())
             .collect();
-        store.models.retain(|m| m.provider_id != id);
+        store
+            .providers
+            .retain(|p| !removed_ids.contains(p.id.as_str()));
+        store
+            .models
+            .retain(|m| !removed_ids.contains(m.provider_id.as_str()));
+        for provider in &removed {
+            secrets.secrets.remove(&provider.secret_ref);
+            clear_bindings_for_provider(&mut store.agent_bindings, &provider.id);
+            clear_catalogs_for_provider(&mut store.agent_catalogs, &provider.id);
+        }
         for mid in removed_model_ids {
             store.model_test_results.remove(&mid);
         }
-        clear_bindings_for_provider(&mut store.agent_bindings, id);
-        clear_catalogs_for_provider(&mut store.agent_catalogs, id);
-        self.save_secrets(&secrets)?;
-        self.save_store(&store)?;
-        Ok(())
+        self.save_store_and_secrets(&store, &secrets)?;
+        Ok(removed.len())
     }
 
     pub fn clone_provider(&self, id: &str, new_name: &str, new_api_key: &str) -> Result<Provider> {
@@ -269,9 +337,11 @@ impl StoreService {
         if !store.providers.iter().any(|p| p.id == input.provider_id) {
             anyhow::bail!("provider not found");
         }
-        if store.models.iter().any(|m| {
-            m.provider_id == input.provider_id && m.model_id == input.model_id
-        }) {
+        if store
+            .models
+            .iter()
+            .any(|m| m.provider_id == input.provider_id && m.model_id == input.model_id)
+        {
             anyhow::bail!("模型已存在：{}", input.model_id);
         }
         let now = now_iso();
@@ -331,9 +401,7 @@ impl StoreService {
             anyhow::bail!("provider not found");
         }
         if store.models.iter().any(|m| {
-            m.id != id
-                && m.provider_id == input.provider_id
-                && m.model_id == input.model_id
+            m.id != id && m.provider_id == input.provider_id && m.model_id == input.model_id
         }) {
             anyhow::bail!("模型已存在：{}", input.model_id);
         }
@@ -386,13 +454,6 @@ impl StoreService {
         Ok(before - store.models.len())
     }
 
-    pub fn save_bindings(&self, bindings: AgentBindings) -> Result<()> {
-        let mut store = self.load_store()?;
-        store.agent_bindings = bindings;
-        self.save_store(&store)?;
-        Ok(())
-    }
-
     pub fn get_api_key(&self, secret_ref: &str) -> Result<String> {
         let secrets = self.load_secrets()?;
         let key = secrets
@@ -404,10 +465,6 @@ impl StoreService {
             anyhow::bail!("该提供商未配置 API Key（可能从仅有配置、无密钥的来源导入）");
         }
         Ok(key)
-    }
-
-    pub fn resolve_provider_key(&self, provider: &Provider) -> Result<String> {
-        self.get_api_key(&provider.secret_ref)
     }
 
     /// Providers (with the models an agent syncs) taken from its persistent
@@ -501,15 +558,22 @@ impl StoreService {
         }
         let now = now_iso();
 
-        if let Some(id) = input.id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(id) = input
+            .id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             let idx = store
                 .test_prompts
                 .iter()
                 .position(|p| p.id == id)
                 .with_context(|| format!("prompt not found: {id}"))?;
-            if store.test_prompts.iter().any(|p| {
-                p.id != id && p.name.eq_ignore_ascii_case(&name)
-            }) {
+            if store
+                .test_prompts
+                .iter()
+                .any(|p| p.id != id && p.name.eq_ignore_ascii_case(&name))
+            {
                 anyhow::bail!("提示词名称已存在：{name}");
             }
             let entry = &mut store.test_prompts[idx];
@@ -777,16 +841,6 @@ pub fn agent_write_base_url(base: &str, protocol: &Protocol) -> String {
     }
 }
 
-pub fn key_fingerprint(key: &str) -> String {
-    // short non-crypto fingerprint for import dedupe only
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in key.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{h:016x}")
-}
-
 fn read_json_or_default<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Default,
@@ -794,8 +848,7 @@ where
     if !path.exists() {
         return Ok(T::default());
     }
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     if text.trim().is_empty() {
         return Ok(T::default());
     }
@@ -806,11 +859,8 @@ fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
     let text = serde_json::to_string_pretty(value)?;
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    write_atomic(path, text.as_bytes())
 }
 
 pub fn find_provider<'a>(store: &'a Store, id: &str) -> Option<&'a Provider> {
@@ -873,42 +923,80 @@ pub fn provider_endpoint_key(base_url: &str, protocol: &Protocol) -> String {
     format!("{}|{}", normalize_base_url(base_url), protocol.as_str())
 }
 
-pub fn provider_dedupe_key(base_url: &str, api_key: &str, protocol: &Protocol) -> String {
-    format!(
-        "{}|{}|{}",
-        normalize_base_url(base_url),
-        key_fingerprint(api_key),
-        protocol.as_str()
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn existing_endpoint_keys(store: &Store) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for p in &store.providers {
-        map.insert(
-            provider_endpoint_key(&p.base_url, &p.protocol),
-            p.id.clone(),
-        );
+    fn service(label: &str) -> StoreService {
+        StoreService::new(ModelHubPaths {
+            root: std::env::temp_dir().join(format!("modelhub-store-{label}-{}", Uuid::new_v4())),
+        })
     }
-    map
-}
 
-pub fn existing_dedupe_keys(store: &Store, secrets: &Secrets) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for p in &store.providers {
-        let key = secrets
-            .secrets
-            .get(&p.secret_ref)
-            .map(|s| s.api_key.as_str())
-            .unwrap_or("");
-        map.insert(
-            provider_dedupe_key(&p.base_url, key, &p.protocol),
-            p.id.clone(),
-        );
+    fn provider(name: &str) -> ProviderInput {
+        ProviderInput {
+            name: name.into(),
+            base_url: format!("https://{name}.example.com"),
+            protocol: Protocol::OpenaiResponses,
+            api_key: format!("key-{name}"),
+            enabled: true,
+            notes: String::new(),
+        }
     }
-    map
-}
 
-pub fn modelhub_root_display(paths: &ModelHubPaths) -> PathBuf {
-    paths.root.clone()
+    #[test]
+    fn batch_delete_providers_updates_store_and_secrets_once() {
+        let svc = service("delete-providers");
+        let a = svc.add_provider(provider("a")).unwrap();
+        let b = svc.add_provider(provider("b")).unwrap();
+        let removed = svc
+            .delete_providers(&[a.id.clone(), "missing".into(), b.id.clone()])
+            .unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(svc.load_store().unwrap().providers.is_empty());
+        assert!(svc.load_secrets().unwrap().secrets.is_empty());
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
+    fn invalid_backup_keep_count_is_rejected_on_save_and_load() {
+        let svc = service("invalid-config");
+        let mut config = AppConfig::default();
+        config.backup_keep_count = 0;
+        assert!(svc.save_config(&config).is_err());
+
+        svc.ensure_dirs().unwrap();
+        fs::write(
+            svc.paths.config_file(),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(svc.load_config().is_err());
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
+    fn store_failure_rolls_secrets_back() {
+        let svc = service("secrets-rollback");
+        let mut original = Secrets::default();
+        original.secrets.insert(
+            "sec_1".into(),
+            SecretEntry {
+                api_key: "old".into(),
+                updated_at: "old".into(),
+            },
+        );
+        svc.save_secrets(&original).unwrap();
+        fs::create_dir_all(svc.paths.store_file()).unwrap();
+
+        let mut changed = original.clone();
+        changed.secrets.get_mut("sec_1").unwrap().api_key = "new".into();
+        assert!(svc
+            .save_store_and_secrets(&Store::default(), &changed)
+            .is_err());
+
+        assert_eq!(svc.load_secrets().unwrap().secrets["sec_1"].api_key, "old");
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
 }

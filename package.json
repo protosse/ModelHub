@@ -8,6 +8,7 @@
     "dev:tauri": "node scripts/dev-launch.mjs",
     "dev:check": "node scripts/dev-launch.mjs --check",
     "build": "tsc && vite build",
+    "test:frontend": "node --experimental-strip-types --test tests/*.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { AppConfig, FullState } from "../types";
+import type { FullState } from "../types";
 import * as api from "../api/tauri";
 
 type Props = {
@@ -100,11 +100,7 @@ export function SettingsPage({ state, onRefresh, onToast }: Props) {
     }
     setSaving(true);
     try {
-      const config: AppConfig = {
-        ...c,
-        backupKeepCount: next,
-      };
-      await api.saveAppConfig(config);
+      await api.setBackupKeepCount(next);
       await onRefresh();
       onToast(`备份保留份数已设为 ${next}（每个 Agent 独立）`);
     } catch (e) {

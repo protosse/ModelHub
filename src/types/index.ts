@@ -133,7 +133,6 @@ export type AppConfig = {
     readonly opencodeAuth: string | null;
     readonly piModels: string | null;
     readonly piSettings: string | null;
-    readonly piAuth: string | null;
   };
 };
 

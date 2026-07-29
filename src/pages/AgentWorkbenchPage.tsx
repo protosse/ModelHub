@@ -82,6 +82,7 @@ export function AgentWorkbenchPage({
       onDraftChange(live);
       bootstrapped.current = true;
     } catch (e) {
+      setPreview(null);
       onToastRef.current(e instanceof Error ? e.message : String(e));
       const empty = emptyBindings();
       setBindings(empty);
@@ -124,6 +125,7 @@ export function AgentWorkbenchPage({
       const p = await api.previewApply([], b);
       setPreview(p);
     } catch (e) {
+      setPreview(null);
       onToastRef.current(e instanceof Error ? e.message : String(e));
     } finally {
       setPreviewBusy(false);

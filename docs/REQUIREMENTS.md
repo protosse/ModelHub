@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-28（设置页可改备份份数；OC/Pi 密钥 Diff）
+> 最后更新：2026-07-29（跨平台安全写入；恢复轮转保护；配置校验）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -327,8 +327,9 @@ ModelHub 库（持久）
 
 - **状态点**：进入/草稿/库变化时一次 `preview_apply([], draft)` 拿全部四个 Agent 的 Diff；某 Agent Diff 含非 `same` 行 → 标「有更改」，否则「一致 / 无配置」  
 - **右侧 Diff**：只显示当前选中 Agent（磁盘现状 → Apply 后）  
-- **应用此 Agent**：单个写出；**应用全部更改**：底部条一键写出所有「有更改」的 Agent  
+- **应用此 Agent**：单个写出；**应用全部更改**：底部条一键写出所有「有更改」的 Agent
 - 流程：备份 → 写出 → 行内结果 / 重启提示  
+- Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置，也不允许旧 Diff 驱动「应用全部」。
 
 #### Diff 规则
 
@@ -368,20 +369,21 @@ ModelHub 库（持久）
   - 按 `agent + stamp` 分组展示快照（不再按单文件平铺）
   - Agent 筛选（全部 / Claude Code / Codex / OpenCode / Pi）与数量
   - 概览：快照组数、文件数、各 Agent 最近备份时间
-  - 展开查看目录与文件路径；可复制目录/文件路径、在系统文件管理器中打开位置
+  - 展开查看目录与文件路径；可复制单个文件路径、在系统文件管理器中打开快照位置（不提供快照目录复制按钮）
   - keep-alive：重新进入页面自动刷新；手动「刷新」仍可用
 - **一键恢复**（按快照组，非单文件）：
   - 确认后调用 `restore_backup(agent, stamp)`
   - 按**当前** Agent 配置路径写出（含 `config.paths` 覆盖；不是写回备份时的旧路径）
   - 文件名映射：Claude `settings.json`；Codex `config.toml`；OpenCode `opencode.json`/`opencode.jsonc`→当前主配置、`auth.json`；Pi `models.json` / `settings.json`
   - 恢复前先把将被覆盖的现有 live 文件再备份一组（新 stamp，计入保留策略）
+  - 创建恢复前安全备份触发轮转时，正在恢复的源内容必须受保护；即使选择已满保留策略中的最旧快照也可完成恢复
   - 无法识别的备份文件跳过并在结果消息中说明；快照内无任何可恢复文件则失败
   - Claude / Codex 提示建议重启；OpenCode / Pi 一般不必
 - **本版不做**：删除备份、手动创建备份、单文件级恢复、恢复后自动改 Store/绑定草稿
 
 ### 3.7 设置
 
-- **可编辑**：备份保留份数（`backupKeepCount`，默认 10，建议范围 1–50；**每个 Agent 独立**保留最近 N 组快照）。保存写入 `~/.modelhub/config.json`
+- **可编辑**：备份保留份数（`backupKeepCount`，默认 10，合法范围 1–50；**每个 Agent 独立**保留最近 N 组快照）。通过 `set_backup_keep_count` 保存到 `~/.modelhub/config.json`，前后端均校验范围
 - **只读展示**：语言（目前仅简体中文）、数据目录 `~/.modelhub`（复制 / 在文件管理器中显示）
 - **Agent 路径**：展示当前检测结果（存在状态 + 完整路径；复制 / 打开位置）；**路径覆盖编辑本版不做**
 - 关于：版本号与产品定位一句话
@@ -441,7 +443,8 @@ ModelHub 库（持久）
 | 命令 | 用途 |
 |------|------|
 | get_state | 库 + 路径 + 密钥遮罩 |
-| Provider/Model CRUD、clone、delete 批量 | 库维护（无 `set_provider_enabled`；`Model` 无 `enabled`） |
+| Provider/Model CRUD、clone、delete 批量 | 库维护；Provider/Model 批量删除均单次 load+save（无 `set_provider_enabled`；`Model` 无 `enabled`） |
+| set_backup_keep_count | 保存每 Agent 备份保留份数（1–50）；不开放整份 AppConfig 覆盖 |
 | set_agent_catalog | 保存某 Agent（opencode/pi）同步目录 `CatalogEntry[]`（按 Provider 去重、去悬空 provider/model；模型 ID 不额外去重；单次落盘） |
 | add_models | 批量添加模型（单次 load+save） |
 | delete_models | 批量删除模型（单次 load+save） |
@@ -600,3 +603,5 @@ src-tauri/src/
 | 2026-07-28 | 备份页重构为**快照浏览器**：按 agent+stamp 分组、Agent 筛选、复制路径/打开位置、重新进入自动刷新；同次 Apply 多文件共用时间戳，时间戳升至毫秒防同秒覆盖。一键恢复仍不做。 |
 | 2026-07-28 | **备份一键恢复**：`restore_backup(agent, stamp)`；确认弹窗；恢复前安全备份当前 live 文件；按当前检测路径映射已知配置文件名；未知文件跳过。删除/手动创建仍不做。 |
 | 2026-07-28 | **设置页**：备份保留份数可保存；数据目录 / Agent 路径只读 + 复制/打开；语言暂仅中文。**OC/Pi 更改对比补密钥 Diff**（OpenCode `auth.json` / 遗留 inline key，Pi 块 `apiKey`）；仅 Key 变化也会标有更改。OpenCode 默认 `model` Preview 与 Apply 对齐（未选绑定时回退磁盘值）。 |
+| 2026-07-29 | 修复跨平台写入与恢复可靠性：Store、Agent JSON、Codex TOML 和恢复统一使用同目录临时文件替换，Windows 支持覆盖已有目标；恢复源在安全备份轮转前读入保护，最旧快照不会因轮转导致恢复失败；轮转删除错误不再静默忽略。Preview 对损坏/不可读 Agent 配置明确失败并清空旧结果。Provider 批量删除改为单次读写，Store/Secrets 联合写入失败时回滚 Secrets。设置 API 收窄为 `set_backup_keep_count` 并在后端强制 1–50。移除已废弃的绑定落盘命令与无调用接口。 |
+| 2026-07-29 | 备份页移除用途重复的快照级「复制目录」按钮；保留「打开位置」以及详情中的单文件「复制路径」。 |

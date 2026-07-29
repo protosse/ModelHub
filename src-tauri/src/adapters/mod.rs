@@ -19,11 +19,13 @@ use anyhow::Result;
 
 use crate::backup;
 use crate::paths::ModelHubPaths;
-use crate::store::{
-    AgentMode, ApplyAgentResult, ApplyRequest, ApplyResult, StoreService,
-};
+use crate::store::{ApplyAgentResult, ApplyRequest, ApplyResult, StoreService};
 
-pub fn apply_all(svc: &StoreService, paths: &ModelHubPaths, req: ApplyRequest) -> Result<ApplyResult> {
+pub fn apply_all(
+    svc: &StoreService,
+    paths: &ModelHubPaths,
+    req: ApplyRequest,
+) -> Result<ApplyResult> {
     let config = svc.load_config()?;
     let mut store = svc.load_store()?;
     if let Some(bindings) = req.bindings {
@@ -65,13 +67,6 @@ pub fn apply_all(svc: &StoreService, paths: &ModelHubPaths, req: ApplyRequest) -
         }
     }
     Ok(ApplyResult { results })
-}
-
-pub fn official_mode_label(mode: &AgentMode) -> &'static str {
-    match mode {
-        AgentMode::Official => "official",
-        AgentMode::ThirdParty => "third_party",
-    }
 }
 
 pub(crate) fn backup_before_write(
