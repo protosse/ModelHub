@@ -27,6 +27,7 @@ pub fn run() {
             commands::preview_import,
             commands::run_import,
             commands::list_backups,
+            commands::delete_backups,
             commands::restore_backup,
             commands::reveal_api_key,
             commands::fetch_provider_models,

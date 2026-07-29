@@ -278,7 +278,7 @@ ModelHub 库（持久）
 
 ### 3.4 Agent 工作台（绑定 + 应用同步，合并页）
 
-「Agent 绑定」与「应用同步」合并为**单页 master-detail**：左侧 Agent 列表（含状态点），右侧选中 Agent 的详情 + 更改对比 + 应用按钮，底部固定「应用全部更改」条。
+「Agent 绑定」与「应用同步」合并为**单页 master-detail**：左侧 Agent 列表（含状态点），右侧选中 Agent 的详情 + 更改对比；右侧底部常驻「应用此 Agent」操作栏，详情滚动时仍保持可见。不提供跨 Agent 批量应用。
 
 #### 3.4.1 两类持久性（关键）
 
@@ -317,7 +317,7 @@ ModelHub 库（持久）
 | Agent | 绑定 | 磁盘解读要点 |
 |-------|------|----------------|
 | Claude | 官方/第三方；Provider+Model | BASE_URL 空 → 官方 |
-| Codex | 同上；记录 `providerKey` | `model_provider` 为 openai/空 → 官方 |
+| Codex | 同上；记录 `providerKey` | `model_provider` 为 openai/空 → 官方；第三方块回匹配 Store 时，OpenAI 系协议将末尾 `/v1` 视为等价，避免 Apply 自动补 `/v1` 后重启显示未匹配 |
 | OpenCode | 默认 Provider+Model（+small） | config `model` 优先，否则 `model.json` recent[0]；受管 Provider 优先按 `_modelhub.providerId` 回匹配 Store |
 | Pi | 默认 Provider+Model | settings `defaultProvider` / `defaultModel`；受管 Provider 优先按 models.json 的 `_modelhub.providerId` 回匹配 Store，避免写出补 `/v1` 后 URL 文字差异导致重启丢绑定 |
 
@@ -327,9 +327,9 @@ ModelHub 库（持久）
 
 - **状态点**：进入/草稿/库变化时一次 `preview_apply([], draft)` 拿全部四个 Agent 的 Diff；某 Agent Diff 含非 `same` 行 → 标「有更改」，否则「一致 / 无配置」  
 - **右侧 Diff**：只显示当前选中 Agent（磁盘现状 → Apply 后）  
-- **应用此 Agent**：单个写出；**应用全部更改**：底部条一键写出所有「有更改」的 Agent
+- **应用此 Agent**：仅写出当前选中的 Agent；按钮位于右侧详情底部常驻操作栏，不随配置与 Diff 内容滚动
 - 流程：备份 → 写出 → 行内结果 / 重启提示  
-- Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置，也不允许旧 Diff 驱动「应用全部」。
+- Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置。
 
 #### Diff 规则
 
@@ -370,6 +370,7 @@ ModelHub 库（持久）
   - Agent 筛选（全部 / Claude Code / Codex / OpenCode / Pi）与数量
   - 概览：快照组数、文件数、各 Agent 最近备份时间
   - 展开查看目录与文件路径；可复制单个文件路径、在系统文件管理器中打开快照位置（不提供快照目录复制按钮）
+  - 支持单选/多选快照组删除：每行可勾选；「全选当前」只作用于当前 Agent 筛选结果，筛选外已选项保留；二次确认后永久删除所选 `agent + stamp` 目录，不修改 Agent 当前 live 配置；删除成功后刷新列表、数量和最近备份概览
   - keep-alive：重新进入页面自动刷新；手动「刷新」仍可用
 - **一键恢复**（按快照组，非单文件）：
   - 确认后调用 `restore_backup(agent, stamp)`
@@ -379,7 +380,7 @@ ModelHub 库（持久）
   - 创建恢复前安全备份触发轮转时，正在恢复的源内容必须受保护；即使选择已满保留策略中的最旧快照也可完成恢复
   - 无法识别的备份文件跳过并在结果消息中说明；快照内无任何可恢复文件则失败
   - Claude / Codex 提示建议重启；OpenCode / Pi 一般不必
-- **本版不做**：删除备份、手动创建备份、单文件级恢复、恢复后自动改 Store/绑定草稿
+- **本版不做**：手动创建备份、单文件级删除/恢复、恢复后自动改 Store/绑定草稿
 
 ### 3.7 设置
 
@@ -452,7 +453,7 @@ ModelHub 库（持久）
 | preview_import / run_import | 导入 |
 | read_live_bindings | 磁盘绑定 |
 | preview_apply / apply_config | Diff 与写出 |
-| list_backups / restore_backup / reveal_api_key | 备份、恢复与密钥 |
+| list_backups / delete_backups / restore_backup / reveal_api_key | 备份列表、快照批量删除、恢复与密钥；`delete_backups` 先校验并去重全部 `{agent, stamp}` 再删除 |
 | test_model_connection | 连通性测试 + 日志 event |
 | list/upsert/delete_test_prompt / set_default_test_prompt | 提示词 |
 | record_model_test_result | 最近测试摘要 |
@@ -465,13 +466,13 @@ ModelHub 库（持久）
 ModelHub
 ├── 提供商      # 列表 + 详情（默认模型 Tab）；测试全部 / 测试所选
 ├── 模型一览    # 跨提供商连通性/响应时间选型（不展示 OC·Pi 同步目录）
-├── Agent 绑定  # 合并工作台：左 Agent 列表(状态点) + 右详情(模式/目录/默认模型 + 本 Agent Diff + 应用)；底部一键应用全部有变更
+├── Agent 绑定  # 合并工作台：左 Agent 列表(状态点) + 右详情(模式/目录/默认模型 + 本 Agent Diff) + 右侧底部常驻单 Agent 应用栏
 ├── 导入        # 扫描 / 筛选 / 勾选 / 确认
 ├── 备份
 └── 设置
 ```
 
-- 全局：「应用更改」→ Agent 工作台  
+- 全局页头不提供应用快捷按钮；通过左侧导航进入 Agent 工作台
 - 弹窗：Esc / 遮罩关闭；删除二次确认  
 - **ConfirmDialog**：Enter 确认、Esc 取消（处理中忽略）；确认钮默认聚焦  
 - Toast：右下角  
@@ -549,7 +550,7 @@ src-tauri/src/
 ```text
 1. （可选）导入：刷新扫描 → 筛选 → 勾选 → 确认 → 补 Key
 2. 提供商：维护模型、获取模型、连通性测试
-3. Agent 绑定（合并工作台）：选 Agent → 调 Active/模式（草稿）或勾同步目录（落盘）→ 看本 Agent Diff → 应用此 Agent 或一键应用全部 → 按需重启
+3. Agent 绑定（合并工作台）：选 Agent → 调 Active/模式（草稿）或勾同步目录（落盘）→ 看本 Agent Diff → 使用底部常驻栏应用此 Agent → 按需重启
 ```
 
 ---
@@ -564,7 +565,7 @@ src-tauri/src/
 | `Provider.enabled` 字段 | 仅保留供旧库迁移种子；Providers 页启用开关、`set_provider_enabled` 命令已移除；同步范围由各 Agent 同步目录决定 |
 | 会话草稿 / 测试详细日志 | 跨重启故意不持久化；草稿会随库删除 scrub |
 | 导入 keep-alive 静默重扫 | 以 store 指纹为准；仅 Agent 配置文件变更需点「刷新扫描」 |
-| 备份删除 / 手动创建、设置路径覆盖编辑、多语言 | 可增强；一键恢复与备份份数编辑已支持 |
+| 手动创建备份、单文件级删除/恢复、设置路径覆盖编辑、多语言 | 可增强；快照删除、一键恢复与备份份数编辑已支持 |
 | Keychain | 可选后续 |
 | 提供商余额 | 明确不做 |
 
@@ -605,3 +606,6 @@ src-tauri/src/
 | 2026-07-28 | **设置页**：备份保留份数可保存；数据目录 / Agent 路径只读 + 复制/打开；语言暂仅中文。**OC/Pi 更改对比补密钥 Diff**（OpenCode `auth.json` / 遗留 inline key，Pi 块 `apiKey`）；仅 Key 变化也会标有更改。OpenCode 默认 `model` Preview 与 Apply 对齐（未选绑定时回退磁盘值）。 |
 | 2026-07-29 | 修复跨平台写入与恢复可靠性：Store、Agent JSON、Codex TOML 和恢复统一使用同目录临时文件替换，Windows 支持覆盖已有目标；恢复源在安全备份轮转前读入保护，最旧快照不会因轮转导致恢复失败；轮转删除错误不再静默忽略。Preview 对损坏/不可读 Agent 配置明确失败并清空旧结果。Provider 批量删除改为单次读写，Store/Secrets 联合写入失败时回滚 Secrets。设置 API 收窄为 `set_backup_keep_count` 并在后端强制 1–50。移除已废弃的绑定落盘命令与无调用接口。 |
 | 2026-07-29 | 备份页移除用途重复的快照级「复制目录」按钮；保留「打开位置」以及详情中的单文件「复制路径」。 |
+| 2026-07-29 | 备份页新增快照组单选/多选删除：「全选当前」遵循当前 Agent 筛选且保留筛选外选择；二次确认后调用 `delete_backups(items)` 永久删除整组备份，不影响 Agent 当前配置；后端先对全部目标做 Agent 白名单、路径段、存在性校验和去重。 |
+| 2026-07-29 | 修复 Codex 第三方 Provider 回读匹配：OpenAI completions/responses 的 Store 裸 baseUrl 与磁盘自动补 `/v1` 地址视为等价；避免 `model_provider=custom` 明明对应库内 Provider/Model，却在 Agent 工作台显示未匹配、Preview 误报 Provider `?` 与 Key 缺失。 |
+| 2026-07-29 | 收敛 Agent 应用入口：移除全局页头「应用更改」和工作台「应用全部更改」；仅保留逐 Agent 应用，并将「应用此 Agent」放入右侧详情底部常驻操作栏，滚动配置/Diff 时持续可见。 |

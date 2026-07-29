@@ -1,5 +1,5 @@
 use crate::adapters;
-use crate::backup::{self, BackupEntry, RestoreBackupResult};
+use crate::backup::{self, BackupEntry, BackupSnapshotRef, RestoreBackupResult};
 use crate::paths::ModelHubPaths;
 use crate::store::{
     AgentBindings, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
@@ -132,6 +132,12 @@ pub fn run_import(request: ImportRequest) -> Result<ImportResult, String> {
 pub fn list_backups() -> Result<Vec<BackupEntry>, String> {
     let (_, paths) = svc()?;
     backup::list_backups(&paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_backups(items: Vec<BackupSnapshotRef>) -> Result<usize, String> {
+    let (_, paths) = svc()?;
+    backup::delete_snapshots(&paths, &items).map_err(|e| e.to_string())
 }
 
 /// Restore one backup snapshot (agent + stamp) onto current live Agent paths.

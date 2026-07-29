@@ -13,12 +13,11 @@ const NAV: readonly { id: PageId; label: string }[] = [
 type Props = {
   readonly page: PageId;
   readonly onNavigate: (page: PageId) => void;
-  readonly onApply: () => void;
   readonly toast: string | null;
   readonly children: React.ReactNode;
 };
 
-export function Layout({ page, onNavigate, onApply, toast, children }: Props) {
+export function Layout({ page, onNavigate, toast, children }: Props) {
   return (
     <div className="relative flex h-full bg-surface-0 text-ink-1">
       <aside className="flex w-52 shrink-0 flex-col border-r border-surface-3 bg-surface-1">
@@ -51,13 +50,10 @@ export function Layout({ page, onNavigate, onApply, toast, children }: Props) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-surface-3 bg-surface-1 px-5">
+        <header className="flex h-14 shrink-0 items-center border-b border-surface-3 bg-surface-1 px-5">
           <div className="text-sm text-ink-2">
             {NAV.find((n) => n.id === page)?.label ?? ""}
           </div>
-          <button type="button" className="btn-primary" onClick={onApply}>
-            应用更改
-          </button>
         </header>
         <main className="min-h-0 flex-1 overflow-hidden p-5">{children}</main>
       </div>

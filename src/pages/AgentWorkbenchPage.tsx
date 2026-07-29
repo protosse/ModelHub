@@ -68,7 +68,7 @@ export function AgentWorkbenchPage({
 
   const [preview, setPreview] = useState<ApplyPreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [busy, setBusy] = useState<null | "one" | "all">(null);
+  const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<Readonly<Record<string, ApplyAgentResult>>>({});
 
   const onToastRef = useRef(onToast);
@@ -147,12 +147,11 @@ export function AgentWorkbenchPage({
     loadPreview,
   ]);
 
-  const applyAgents = useCallback(
-    async (agents: readonly AgentId[], scope: "one" | "all") => {
-      if (agents.length === 0) return;
-      setBusy(scope);
+  const applyAgent = useCallback(
+    async (agent: AgentId) => {
+      setBusy(true);
       try {
-        const res = await api.applyConfig(agents, bindings);
+        const res = await api.applyConfig([agent], bindings);
         setResults((prev) => {
           const next = { ...prev };
           for (const r of res.results) next[r.agent] = r;
@@ -164,15 +163,10 @@ export function AgentWorkbenchPage({
       } catch (e) {
         onToast(e instanceof Error ? e.message : String(e));
       } finally {
-        setBusy(null);
+        setBusy(false);
       }
     },
     [bindings, loadPreview, onToast],
-  );
-
-  const changedAgents = useMemo(
-    () => AGENTS.filter((a) => agentChanged(preview, a.id)).map((a) => a.id),
-    [preview],
   );
 
   if (loading) {
@@ -229,72 +223,57 @@ export function AgentWorkbenchPage({
         </aside>
 
         {/* Right: selected agent detail */}
-        <section className="min-w-0 flex-1 overflow-auto">
-          <div className="card p-4">
-            <AgentDetailHeader state={state} id={selected} label={selectedAgent.label} />
+        <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1 overflow-auto pb-3">
+            <div className="card p-4">
+              <AgentDetailHeader state={state} id={selected} label={selectedAgent.label} />
 
-            {selected === "claude" || selected === "codex" ? (
-              <ActiveOnlyEditor
-                id={selected}
-                bindings={bindings}
-                providers={providers}
-                modelsOf={modelsOf}
-                onPatch={patch}
+              {selected === "claude" || selected === "codex" ? (
+                <ActiveOnlyEditor
+                  id={selected}
+                  bindings={bindings}
+                  providers={providers}
+                  modelsOf={modelsOf}
+                  onPatch={patch}
+                />
+              ) : (
+                <CatalogEditor
+                  id={selected}
+                  state={state}
+                  bindings={bindings}
+                  modelsOf={modelsOf}
+                  onPatch={patch}
+                  onToast={onToast}
+                  onRefresh={onRefresh}
+                />
+              )}
+
+              <AgentDiffView
+                preview={preview}
+                busy={previewBusy}
+                agent={selected}
               />
-            ) : (
-              <CatalogEditor
-                id={selected}
-                state={state}
-                bindings={bindings}
-                modelsOf={modelsOf}
-                onPatch={patch}
-                onToast={onToast}
-                onRefresh={onRefresh}
-              />
-            )}
+            </div>
+          </div>
 
-            <AgentDiffView
-              preview={preview}
-              busy={previewBusy}
-              agent={selected}
-            />
-
-            <div className="mt-4 flex items-center gap-2">
+          <div className="flex shrink-0 items-center justify-between rounded-lg border border-surface-3 bg-surface-1 px-4 py-3 shadow-lg">
+            <div className="min-w-0">
+              <div className="text-xs text-ink-3">当前 Agent</div>
+              <div className="truncate text-sm font-medium text-ink-1">{selectedAgent.label}</div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {results[selected] ? <ResultBadge result={results[selected]} /> : null}
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy !== null}
-                onClick={() => void applyAgents([selected], "one")}
+                disabled={busy}
+                onClick={() => void applyAgent(selected)}
               >
-                {busy === "one" ? "应用中…" : "应用此 Agent"}
+                {busy ? "应用中…" : "应用此 Agent"}
               </button>
-              {results[selected] ? (
-                <ResultBadge result={results[selected]} />
-              ) : null}
             </div>
           </div>
         </section>
-      </div>
-
-      {/* Bottom bar: apply all changed */}
-      <div className="mt-3 flex shrink-0 items-center justify-between rounded-lg border border-surface-3 bg-surface-1 px-4 py-3">
-        <span className="text-sm text-ink-2">
-          {changedAgents.length > 0
-            ? `${changedAgents.length} 个 Agent 有待应用更改：${changedAgents
-                .map((id) => AGENTS.find((a) => a.id === id)?.label)
-                .join("、")}`
-            : "所有 Agent 与磁盘一致"}
-        </span>
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={busy !== null || changedAgents.length === 0}
-          onClick={() => void applyAgents(changedAgents, "all")}
-        >
-          {busy === "all"
-            ? "应用中…"
-            : `应用全部更改 (${changedAgents.length})`}
-        </button>
       </div>
     </div>
   );

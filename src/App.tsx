@@ -99,7 +99,6 @@ export default function App() {
     <Layout
       page={page}
       onNavigate={navigate}
-      onApply={() => navigate("agents")}
       toast={toast}
     >
       {/* Mount once on first visit, then keep alive across tab switches. */}

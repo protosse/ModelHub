@@ -7,6 +7,7 @@ import { getLastTestResult } from "./lastTestResults";
 import { getBatchTestSession } from "./batchTestSession";
 import { getMultiTestSession } from "./multiTestSession";
 import { getSingleTestSession } from "./singleTestSession";
+import { pickTestDisplaySource } from "./testDisplayPolicy";
 
 export type DisplayTestStatus = "pending" | "running" | "ok" | "fail" | "skipped";
 
@@ -22,9 +23,20 @@ export type ModelTestDisplay = {
 
 /** Best-effort live/last view for one model across all test runners. */
 export function getModelTestDisplay(modelId: string): ModelTestDisplay {
-  // Single-model session: only while busy (or has live lines for this model).
   const single = getSingleTestSession();
-  if (single?.modelId === modelId && single.busy) {
+  const multi = getMultiTestSession();
+  const multiRow = multi?.rows.find((r) => r.modelId === modelId);
+  const batch = getBatchTestSession();
+  const batchRow = batch?.rows.find((r) => r.modelId === modelId);
+  const last = getLastTestResult(modelId);
+  const source = pickTestDisplaySource({
+    singleRunning: Boolean(single?.modelId === modelId && single.busy),
+    multiRunning: Boolean(multi?.busy && multiRow),
+    batchRunning: Boolean(batch?.busy && batchRow),
+    hasLast: Boolean(last),
+  });
+
+  if (source === "single" && single) {
     return {
       modelId,
       status: "running",
@@ -36,50 +48,34 @@ export function getModelTestDisplay(modelId: string): ModelTestDisplay {
     };
   }
 
-  // Multi session row is authoritative for models in that session
-  // (including pending while queue is waiting).
-  const multi = getMultiTestSession();
-  if (multi) {
-    const row = multi.rows.find((r) => r.modelId === modelId);
-    if (row) {
-      // After a finished multi run, still surface ok/fail/logs from session.
-      // For pending: only treat as live pending while busy; otherwise fall through
-      // to disk last result (so old finished sessions don't force forever-pending).
-      if (multi.busy || row.status !== "pending") {
-        return {
-          modelId,
-          status: row.status,
-          logs: row.logs,
-          result: row.result,
-          error: row.error,
-          latencyMs: row.result?.latencyMs ?? null,
-          source: "multi",
-        };
-      }
-      // busy=false and pending: session created but not started, or leftover — prefer last
-    }
+  // A running multi session is authoritative for its rows. Once it finishes,
+  // use `lastTestResults`: a newer single/batch run may already have replaced
+  // the outcome, and completed session rows must not shadow that shared value.
+  if (source === "multi" && multiRow) {
+    return {
+      modelId,
+      status: multiRow.status,
+      logs: multiRow.logs,
+      result: multiRow.result,
+      error: multiRow.error,
+      latencyMs: multiRow.result?.latencyMs ?? null,
+      source: "multi",
+    };
   }
 
-  const batch = getBatchTestSession();
-  if (batch) {
-    const row = batch.rows.find((r) => r.modelId === modelId);
-    if (row) {
-      if (batch.busy || row.status !== "pending") {
-        return {
-          modelId,
-          status: row.status,
-          logs: row.logs,
-          result: row.result,
-          error: row.error,
-          latencyMs: row.result?.latencyMs ?? null,
-          source: "batch",
-        };
-      }
-    }
+  if (source === "batch" && batchRow) {
+    return {
+      modelId,
+      status: batchRow.status,
+      logs: batchRow.logs,
+      result: batchRow.result,
+      error: batchRow.error,
+      latencyMs: batchRow.result?.latencyMs ?? null,
+      source: "batch",
+    };
   }
 
-  const last = getLastTestResult(modelId);
-  if (last) {
+  if (source === "last" && last) {
     return {
       modelId,
       status: last.ok ? "ok" : "fail",

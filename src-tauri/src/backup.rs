@@ -117,14 +117,56 @@ pub struct RestoreBackupResult {
     pub restart_required: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSnapshotRef {
+    pub agent: String,
+    pub stamp: String,
+}
+
 fn validate_agent_stamp(agent: &str, stamp: &str) -> Result<()> {
-    if !is_safe_segment(agent) {
+    if !matches!(agent, "claude" | "codex" | "opencode" | "pi") {
         bail!("invalid agent id");
     }
     if !is_safe_segment(stamp) {
         bail!("invalid backup stamp");
     }
     Ok(())
+}
+
+/// Permanently delete one snapshot group. This only touches ModelHub's backup
+/// tree and never deletes or rewrites the Agent's live configuration.
+pub fn delete_snapshot(paths: &ModelHubPaths, agent: &str, stamp: &str) -> Result<()> {
+    validate_agent_stamp(agent, stamp)?;
+    let dir = paths.backups_dir().join(agent).join(stamp);
+    if !dir.is_dir() {
+        bail!("backup snapshot not found: {agent}/{stamp}");
+    }
+    fs::remove_dir_all(&dir).with_context(|| format!("delete backup snapshot {agent}/{stamp}"))?;
+    Ok(())
+}
+
+/// Validate the entire request before deleting anything. Duplicate snapshot
+/// references are collapsed while preserving the caller's order.
+pub fn delete_snapshots(paths: &ModelHubPaths, items: &[BackupSnapshotRef]) -> Result<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut dirs = Vec::new();
+    for item in items {
+        validate_agent_stamp(&item.agent, &item.stamp)?;
+        if !seen.insert((item.agent.clone(), item.stamp.clone())) {
+            continue;
+        }
+        let dir = paths.backups_dir().join(&item.agent).join(&item.stamp);
+        if !dir.is_dir() {
+            bail!("backup snapshot not found: {}/{}", item.agent, item.stamp);
+        }
+        dirs.push((dir, item));
+    }
+
+    for (_, item) in &dirs {
+        delete_snapshot(paths, &item.agent, &item.stamp)?;
+    }
+    Ok(dirs.len())
 }
 
 fn is_safe_segment(s: &str) -> bool {
@@ -299,9 +341,78 @@ mod tests {
     #[test]
     fn safe_segment_rejects_traversal() {
         assert!(validate_agent_stamp("claude", "20260101-000000-001").is_ok());
+        assert!(validate_agent_stamp("other", "20260101-000000-001").is_err());
         assert!(validate_agent_stamp("../x", "a").is_err());
         assert!(validate_agent_stamp("claude", "a/b").is_err());
         assert!(validate_agent_stamp("claude", "..").is_err());
+    }
+
+    #[test]
+    fn delete_snapshot_removes_only_selected_group() {
+        let tmp = make_tmp("delete");
+        let paths = ModelHubPaths {
+            root: tmp.join(".modelhub"),
+        };
+        let selected = paths
+            .backups_dir()
+            .join("claude")
+            .join("20260101-000000-001");
+        let kept = paths
+            .backups_dir()
+            .join("claude")
+            .join("20260102-000000-001");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(selected.join("settings.json"), b"selected").unwrap();
+        fs::write(kept.join("settings.json"), b"kept").unwrap();
+
+        delete_snapshot(&paths, "claude", "20260101-000000-001").unwrap();
+
+        assert!(!selected.exists());
+        assert!(kept.exists());
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_validates_all_targets_and_deduplicates() {
+        let tmp = make_tmp("batch-delete");
+        let paths = ModelHubPaths {
+            root: tmp.join(".modelhub"),
+        };
+        let first = BackupSnapshotRef {
+            agent: "claude".into(),
+            stamp: "20260101-000000-001".into(),
+        };
+        let second = BackupSnapshotRef {
+            agent: "codex".into(),
+            stamp: "20260102-000000-001".into(),
+        };
+        for item in [&first, &second] {
+            fs::create_dir_all(paths.backups_dir().join(&item.agent).join(&item.stamp)).unwrap();
+        }
+
+        let missing = BackupSnapshotRef {
+            agent: "pi".into(),
+            stamp: "20260103-000000-001".into(),
+        };
+        assert!(delete_snapshots(&paths, &[first.clone(), missing]).is_err());
+        assert!(paths
+            .backups_dir()
+            .join(&first.agent)
+            .join(&first.stamp)
+            .exists());
+
+        let removed = delete_snapshots(&paths, &[first.clone(), first, second]).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!paths
+            .backups_dir()
+            .join("claude/20260101-000000-001")
+            .exists());
+        assert!(!paths
+            .backups_dir()
+            .join("codex/20260102-000000-001")
+            .exists());
+        fs::remove_dir_all(tmp).unwrap();
     }
 
     fn make_tmp(label: &str) -> PathBuf {

@@ -140,6 +140,12 @@ export async function listBackups(): Promise<readonly BackupEntry[]> {
   return invoke("list_backups");
 }
 
+export async function deleteBackups(
+  items: readonly { readonly agent: string; readonly stamp: string }[],
+): Promise<number> {
+  return invoke("delete_backups", { items: [...items] });
+}
+
 export async function restoreBackup(
   agent: string,
   stamp: string,

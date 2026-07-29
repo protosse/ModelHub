@@ -11,10 +11,7 @@ use fs_err as fs;
 
 /// Read each agent config from disk and map into ModelHub AgentBindings
 /// (matched against known providers/models in the store when possible).
-pub fn read_live_bindings(
-    svc: &StoreService,
-    config: &AppConfig,
-) -> Result<AgentBindings> {
+pub fn read_live_bindings(svc: &StoreService, config: &AppConfig) -> Result<AgentBindings> {
     let store = svc.load_store()?;
     Ok(AgentBindings {
         claude: live_claude(config, &store)?,
@@ -30,7 +27,10 @@ fn live_claude(config: &AppConfig, store: &Store) -> Result<ClaudeBinding> {
         return Ok(ClaudeBinding::default());
     }
     let root = read_json_value(&file)?;
-    let env = root.get("env").cloned().unwrap_or(Value::Object(Default::default()));
+    let env = root
+        .get("env")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
     let base = env
         .get("ANTHROPIC_BASE_URL")
         .and_then(|v| v.as_str())
@@ -132,11 +132,7 @@ fn live_codex(config: &AppConfig, store: &Store) -> Result<CodexBinding> {
         mode: AgentMode::ThirdParty,
         provider_id,
         model_id,
-        provider_key: if mp.is_empty() {
-            "modelhub".into()
-        } else {
-            mp
-        },
+        provider_key: if mp.is_empty() { "modelhub".into() } else { mp },
     })
 }
 
@@ -190,25 +186,24 @@ fn live_opencode(config: &AppConfig, store: &Store) -> Result<OpencodeBinding> {
         .map(protocol_from_npm)
         .unwrap_or(Protocol::OpenaiCompletions);
 
-    let (provider_id, model_id) = if let Some(matched) =
-        match_managed_provider_model(store, provider_block, &upstream)
-    {
-        matched
-    } else if !base.is_empty() {
-        match_provider_model(
-            store,
-            &base,
-            protocol,
-            if upstream.is_empty() {
-                None
-            } else {
-                Some(&upstream)
-            },
-            true,
-        )
-    } else {
-        match_by_name_and_model(store, &slug, &upstream)
-    };
+    let (provider_id, model_id) =
+        if let Some(matched) = match_managed_provider_model(store, provider_block, &upstream) {
+            matched
+        } else if !base.is_empty() {
+            match_provider_model(
+                store,
+                &base,
+                protocol,
+                if upstream.is_empty() {
+                    None
+                } else {
+                    Some(&upstream)
+                },
+                true,
+            )
+        } else {
+            match_by_name_and_model(store, &slug, &upstream)
+        };
 
     let small = root
         .get("small_model")
@@ -301,11 +296,9 @@ fn live_pi(config: &AppConfig, store: &Store) -> Result<PiBinding> {
         }
     }
 
-    let (provider_id, model_id) = if let Some(matched) = match_managed_provider_model(
-        store,
-        provider_block.as_ref(),
-        &def_m,
-    ) {
+    let (provider_id, model_id) = if let Some(matched) =
+        match_managed_provider_model(store, provider_block.as_ref(), &def_m)
+    {
         matched
     } else if !base.is_empty() {
         match_provider_model(
@@ -356,13 +349,18 @@ fn match_provider_model(
 ) -> (Option<String>, Option<String>) {
     let base = normalize_base_url(base_url);
     let endpoint = provider_endpoint_key(&base, &protocol);
+    let comparable_base = provider_base_for_match(&base, &protocol);
 
     let provider = store.providers.iter().find(|p| {
         let pe = provider_endpoint_key(&p.base_url, &p.protocol);
         if pe == endpoint {
             return true;
         }
-        if loose_protocol && normalize_base_url(&p.base_url) == base {
+        let provider_base = provider_base_for_match(&p.base_url, &p.protocol);
+        if p.protocol == protocol && provider_base == comparable_base {
+            return true;
+        }
+        if loose_protocol && provider_base == comparable_base {
             return true;
         }
         false
@@ -380,12 +378,26 @@ fn match_provider_model(
                 store
                     .models
                     .iter()
-                    .find(|x| x.provider_id == p.id && (x.model_id.contains(m) || m.contains(&x.model_id)))
+                    .find(|x| {
+                        x.provider_id == p.id && (x.model_id.contains(m) || m.contains(&x.model_id))
+                    })
                     .map(|x| x.id.clone())
             }),
         _ => None,
     };
     (provider_id, model_id)
+}
+
+fn provider_base_for_match(base_url: &str, protocol: &Protocol) -> String {
+    let base = normalize_base_url(base_url);
+    if matches!(
+        protocol,
+        Protocol::OpenaiCompletions | Protocol::OpenaiResponses
+    ) {
+        base.strip_suffix("/v1").unwrap_or(&base).to_string()
+    } else {
+        base
+    }
 }
 
 fn match_by_name_and_model(
@@ -473,5 +485,42 @@ mod tests {
         let matched = match_managed_provider_model(&store, Some(&disk_block), "glm-test");
 
         assert_eq!(matched, Some((Some("prov_1".into()), Some("mdl_1".into()))));
+    }
+
+    #[test]
+    fn codex_provider_matches_store_url_without_written_v1_suffix() {
+        let mut store = Store::default();
+        store.providers.push(Provider {
+            id: "prov_zzzcoding".into(),
+            name: "zzzcoding".into(),
+            base_url: "https://api.zzzcoding.org".into(),
+            protocol: Protocol::OpenaiResponses,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_zzzcoding".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+        store.models.push(Model {
+            id: "mdl_sol".into(),
+            provider_id: "prov_zzzcoding".into(),
+            model_id: "gpt-5.6-sol".into(),
+            display_name: "gpt-5.6-sol".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+
+        let matched = match_provider_model(
+            &store,
+            "https://api.zzzcoding.org/v1",
+            Protocol::OpenaiResponses,
+            Some("gpt-5.6-sol"),
+            true,
+        );
+
+        assert_eq!(
+            matched,
+            (Some("prov_zzzcoding".into()), Some("mdl_sol".into()))
+        );
     }
 }
