@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-29（跨平台安全写入；恢复轮转保护；配置校验）
+> 最后更新：2026-07-29（侧栏可收起为图标栏；跨平台安全写入；恢复轮转保护；配置校验）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -473,6 +473,7 @@ ModelHub
 ```
 
 - 全局页头不提供应用快捷按钮；通过左侧导航进入 Agent 工作台
+- **左侧导航可收起**：展开约 `w-52` 显示图标+文案；收起约 `w-14` 仅图标（`title`/`aria-label` 保留名称提示）；底部「收起/展开侧栏」切换；偏好记在 `localStorage`（`modelhub.sidebarCollapsed`），跨会话保留
 - 弹窗：Esc / 遮罩关闭；删除二次确认  
 - **ConfirmDialog**：Enter 确认、Esc 取消（处理中忽略）；确认钮默认聚焦  
 - Toast：右下角  
@@ -609,3 +610,4 @@ src-tauri/src/
 | 2026-07-29 | 备份页新增快照组单选/多选删除：「全选当前」遵循当前 Agent 筛选且保留筛选外选择；二次确认后调用 `delete_backups(items)` 永久删除整组备份，不影响 Agent 当前配置；后端先对全部目标做 Agent 白名单、路径段、存在性校验和去重。 |
 | 2026-07-29 | 修复 Codex 第三方 Provider 回读匹配：OpenAI completions/responses 的 Store 裸 baseUrl 与磁盘自动补 `/v1` 地址视为等价；避免 `model_provider=custom` 明明对应库内 Provider/Model，却在 Agent 工作台显示未匹配、Preview 误报 Provider `?` 与 Key 缺失。 |
 | 2026-07-29 | 收敛 Agent 应用入口：移除全局页头「应用更改」和工作台「应用全部更改」；仅保留逐 Agent 应用，并将「应用此 Agent」放入右侧详情底部常驻操作栏，滚动配置/Diff 时持续可见。 |
+| 2026-07-29 | 左侧主导航支持收起为仅图标栏（约 56px），展开为图标+文案；收起偏好 localStorage 持久化。 |
