@@ -67,9 +67,16 @@ async function ensureLogListener(): Promise<void> {
     if (!payload?.line || !payload.runId) return;
     if (!session || session.runId !== payload.runId) return;
     session.liveLines = [...session.liveLines, payload.line];
-    setLastTestResult(session.modelId, session.result?.ok ?? false, session.result?.latencyMs, {
+    // Share live progress with other UIs (batch/multi) in memory, but never
+    // clobber the previous finished outcome: during a run `session.result` is
+    // null, so writing `session.result?.ok ?? false` would mark the model as
+    // failed in the shared cache. Preserve the prior ok/result and only update
+    // the logs. On stop the in-flight run is discarded, so the last successful
+    // test must remain visible as successful.
+    const prev = getLastTestResult(session.modelId);
+    setLastTestResult(session.modelId, prev?.ok ?? false, prev?.latencyMs, {
       logs: session.liveLines,
-      result: session.result,
+      result: prev?.result ?? null,
       memoryOnly: true,
     });
     notify();
@@ -138,6 +145,12 @@ export function requestStopSingleTest(): void {
   // Invalidate run so the late invoke response is ignored.
   s.runId = null;
   s.busy = false;
+  // Restore the last finished result so the panel reflects the previous
+  // outcome instead of showing the stopped run as a failure.
+  const prev = getLastTestResult(s.modelId);
+  if (prev?.result) {
+    s.result = prev.result;
+  }
   notify();
 }
 

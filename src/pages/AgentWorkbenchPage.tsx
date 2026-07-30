@@ -159,6 +159,9 @@ export function AgentWorkbenchPage({
         });
         const failed = res.results.filter((r) => !r.ok).length;
         onToast(failed ? `应用完成，${failed} 个失败` : "应用成功");
+        // Refresh global state (notably `paths.*Exists`) so the agent list
+        // stops showing "未找到" after Apply creates the config file.
+        await onRefresh();
         await loadPreview(bindings);
       } catch (e) {
         onToast(e instanceof Error ? e.message : String(e));
@@ -166,7 +169,7 @@ export function AgentWorkbenchPage({
         setBusy(false);
       }
     },
-    [bindings, loadPreview, onToast],
+    [bindings, loadPreview, onToast, onRefresh],
   );
 
   if (loading) {
@@ -518,8 +521,24 @@ function CatalogEditor({
   // Default model provider is restricted to the catalog.
   const catalogProviders = providers.filter((p) => byProvider.has(p.id));
   const b = bindings[id];
+
+  // Effective model subset for a provider in the catalog: empty `modelIds`
+  // means "all models" (dynamic); otherwise only the listed model row ids.
+  // The default-model picker is restricted to this subset so the draft can
+  // never reference a model that Apply won't write into the block.
+  const subsetModelsOf = useCallback(
+    (providerId: string | null): readonly Model[] => {
+      if (!providerId) return [];
+      const entry = byProvider.get(providerId);
+      const all = modelsOf(providerId);
+      if (!entry || entry.modelIds.length === 0) return all;
+      const set = new Set(entry.modelIds);
+      return all.filter((m) => set.has(m.id));
+    },
+    [byProvider, modelsOf],
+  );
   const firstModelId = (providerId: string | null): string | null =>
-    modelsOf(providerId)[0]?.id ?? null;
+    subsetModelsOf(providerId)[0]?.id ?? null;
   const setProvider = (providerId: string | null) => {
     const modelId = firstModelId(providerId);
     onPatch({ ...bindings, [id]: { ...bindings[id], providerId, modelId } } as AgentBindings);
@@ -642,7 +661,7 @@ function CatalogEditor({
               providers={catalogProviders}
               providerId={b.providerId}
               modelId={b.modelId}
-              models={modelsOf(b.providerId)}
+              models={subsetModelsOf(b.providerId)}
               onProvider={setProvider}
               onModel={setModel}
             />

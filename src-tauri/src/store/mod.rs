@@ -448,6 +448,7 @@ impl StoreService {
         store.models.retain(|m| !id_set.contains(m.id.as_str()));
         for mid in &removed {
             clear_bindings_for_model(&mut store.agent_bindings, mid);
+            clear_model_from_catalogs(&mut store.agent_catalogs, mid);
             store.model_test_results.remove(mid);
         }
         self.save_store(&store)?;
@@ -757,6 +758,29 @@ fn clear_catalogs_for_provider(c: &mut AgentCatalogs, provider_id: &str) {
     }
 }
 
+/// Remove a deleted model id from every catalog entry's `model_ids`. Only
+/// entries that explicitly listed the id are touched — an entry that was `[]`
+/// (= all models, dynamic) is left alone. If filtering empties an entry, the
+/// whole entry is removed so the provider does not silently switch to
+/// "all models" (`[]`), matching the UI rule that zero selected models = remove.
+fn clear_model_from_catalogs(c: &mut AgentCatalogs, model_id: &str) {
+    for list in [c.opencode.as_mut(), c.pi.as_mut()] {
+        if let Some(entries) = list {
+            let mut i = 0;
+            while i < entries.len() {
+                if entries[i].model_ids.iter().any(|id| id == model_id) {
+                    entries[i].model_ids.retain(|id| id != model_id);
+                    if entries[i].model_ids.is_empty() {
+                        entries.remove(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+}
+
 fn clear_bindings_for_provider(b: &mut AgentBindings, provider_id: &str) {
     if b.claude.provider_id.as_deref() == Some(provider_id) {
         b.claude.provider_id = None;
@@ -901,8 +925,17 @@ pub fn provider_slug(provider: &Provider) -> String {
 /// so two providers sharing a base_url but differing by protocol (e.g.
 /// `jianzhile` responses + `jianzhile-cc` anthropic) never collide. Returns a
 /// map provider.id -> key. Both apply and preview must use this same map.
-pub fn assign_catalog_write_keys(providers: &[Provider]) -> HashMap<String, String> {
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+/// `reserved` holds on-disk provider keys that are NOT managed by ModelHub
+/// (native/user blocks). Generated keys also avoid these so a ModelHub provider
+/// whose slug happens to equal a native block's key never overwrites or takes
+/// over that native block — it lands at `<slug>-2` instead, and the native block
+/// is left untouched (preserved on cleanup). Already-managed disk blocks are not
+/// reserved: they carry `_modelhub.providerId` and are matched/reused directly.
+pub fn assign_catalog_write_keys_with_reserved(
+    providers: &[Provider],
+    reserved: &std::collections::HashSet<String>,
+) -> HashMap<String, String> {
+    let mut used: std::collections::HashSet<String> = reserved.iter().cloned().collect();
     let mut out: HashMap<String, String> = HashMap::new();
     for p in providers {
         let base = provider_slug(p);
@@ -918,9 +951,24 @@ pub fn assign_catalog_write_keys(providers: &[Provider]) -> HashMap<String, Stri
     out
 }
 
-/// Same endpoint = same provider across agents (ignore key presence differences)
+/// Same endpoint = same provider across agents (ignore key presence differences).
+///
+/// For OpenAI-style protocols (completions / responses) a trailing `/v1` is
+/// stripped, mirroring `provider_base_for_match` and the `/v1` that Apply
+/// auto-appends. Otherwise a Provider saved as `https://x` and the same endpoint
+/// written back to an agent file as `https://x/v1` would compute different keys,
+/// so re-importing/scanning would treat the ModelHub-written block as a brand
+/// new provider and produce duplicate imports. Anthropic endpoints keep the
+/// full URL (no `/v1` convention).
 pub fn provider_endpoint_key(base_url: &str, protocol: &Protocol) -> String {
-    format!("{}|{}", normalize_base_url(base_url), protocol.as_str())
+    let base = normalize_base_url(base_url);
+    let canonical = match protocol {
+        Protocol::OpenaiCompletions | Protocol::OpenaiResponses => {
+            base.strip_suffix("/v1").unwrap_or(&base).to_string()
+        }
+        Protocol::AnthropicMessages => base,
+    };
+    format!("{}|{}", canonical, protocol.as_str())
 }
 
 #[cfg(test)]
@@ -998,5 +1046,97 @@ mod tests {
 
         assert_eq!(svc.load_secrets().unwrap().secrets["sec_1"].api_key, "old");
         fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
+    fn provider_endpoint_key_normalizes_v1_for_openai_protocols() {
+        // OpenAI-style protocols strip /v1 so the same endpoint written with or
+        // without /v1 produces the same key (import deduplication).
+        let base = "https://api.example.com";
+        let openai = Protocol::OpenaiResponses;
+        assert_eq!(
+            provider_endpoint_key(base, &openai),
+            provider_endpoint_key(&format!("{base}/v1"), &openai),
+        );
+        // Anthropic keeps the full URL (no /v1 convention); key uses `|` separator.
+        let anthropic = Protocol::AnthropicMessages;
+        let anthropic_key = provider_endpoint_key(base, &anthropic);
+        assert_eq!(
+            anthropic_key,
+            "https://api.example.com|anthropic-messages",
+        );
+    }
+
+    #[test]
+    fn delete_model_clears_model_ids_from_catalogs() {
+        let svc = service("delete-model-catalog");
+        let p = svc.add_provider(provider("x")).unwrap();
+        let m1 = svc.add_model(ModelInput {
+            provider_id: p.id.clone(),
+            model_id: "gpt-4".into(),
+            display_name: "GPT-4".into(),
+        }).unwrap();
+        let m2 = svc.add_model(ModelInput {
+            provider_id: p.id.clone(),
+            model_id: "gpt-3.5".into(),
+            display_name: "GPT-3.5".into(),
+        }).unwrap();
+
+        // OC: explicit subset [m1, m2]; PI: empty = all models.
+        svc.set_agent_catalog("opencode", &[
+            CatalogEntry { provider_id: p.id.clone(), model_ids: vec![m1.id.clone(), m2.id.clone()] },
+        ]).unwrap();
+        svc.set_agent_catalog("pi", &[
+            CatalogEntry { provider_id: p.id.clone(), model_ids: vec![] },
+        ]).unwrap();
+
+        // Delete m1 — OC subset shrinks to [m2]; PI empty stays empty.
+        svc.delete_model(&m1.id).unwrap();
+        let store = svc.load_store().unwrap();
+        let oc_entry = store.agent_catalogs.opencode.as_ref()
+            .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
+        let pi_entry = store.agent_catalogs.pi.as_ref()
+            .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
+        assert_eq!(
+            oc_entry.map(|e| e.model_ids.clone()),
+            Some(vec![m2.id.clone()])
+        );
+        assert_eq!(pi_entry.map(|e| e.model_ids.len()), Some(0));
+
+        // Delete m2 — OC entry is now empty and should be removed entirely;
+        // PI empty entry stays.
+        svc.delete_model(&m2.id).unwrap();
+        let store = svc.load_store().unwrap();
+        let oc_remaining = store.agent_catalogs.opencode.as_ref()
+            .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
+        let pi_remaining = store.agent_catalogs.pi.as_ref()
+            .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
+        assert!(oc_remaining.is_none(), "empty subset entry should be removed from OC catalog");
+        assert!(pi_remaining.is_some(), "PI entry with empty subset (all models) stays");
+
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
+    fn write_keys_avoid_native_unmanaged_disk_keys() {
+        let providers = vec![Provider {
+            id: "prov_1".into(),
+            name: "Native Provider".into(),
+            base_url: "https://native.example.com".into(),
+            protocol: Protocol::OpenaiResponses,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_1".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        }];
+        // A native (unmanaged) disk block happens to have the same key slug.
+        let reserved: std::collections::HashSet<String> =
+            ["native-provider"].into_iter().map(String::from).collect();
+
+        let keys = assign_catalog_write_keys_with_reserved(&providers, &reserved);
+
+        // Should land at native-provider-2, not overwrite the native block.
+        assert_eq!(keys.get("prov_1"), Some(&"native-provider-2".into()));
     }
 }

@@ -2,11 +2,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::util::{find_existing_provider_entry, is_modelhub_managed_provider, read_json_value};
+use super::util::{
+    find_existing_provider_entry, is_modelhub_managed_provider, read_json_value, unmanaged_provider_keys,
+};
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
-    agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
-    AgentMode, AppConfig, Secrets, Store, StoreService,
+    agent_write_base_url, assign_catalog_write_keys_with_reserved, find_provider,
+    resolve_upstream_model_id, AgentMode, AppConfig, Secrets, Store, StoreService,
 };
 use fs_err as fs;
 
@@ -315,9 +317,13 @@ fn preview_opencode(
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
-    // Same key map apply uses (name slug, de-duped) so preview matches disk.
-    let key_map =
-        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+    // Same key map apply uses (name slug, de-duped, avoiding native disk keys)
+    // so preview matches disk.
+    let native_keys = unmanaged_provider_keys(&existing);
+    let key_map = assign_catalog_write_keys_with_reserved(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        &native_keys,
+    );
     // Apply only writes `model` when BOTH provider and model are set; otherwise
     // leave disk value alone. Mirror that so an unset binding is not a phantom change.
     let active = match (
@@ -462,9 +468,13 @@ fn preview_pi(
     } else {
         Default::default()
     };
-    // Same key map apply uses (name slug, de-duped) so preview matches disk.
-    let key_map =
-        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+    // Same key map apply uses (name slug, de-duped, avoiding native disk keys)
+    // so preview matches disk.
+    let native_keys = unmanaged_provider_keys(&existing);
+    let key_map = assign_catalog_write_keys_with_reserved(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        &native_keys,
+    );
     // Apply only writes defaultProvider/defaultModel when BOTH are set in the
     // draft; otherwise it leaves the disk values untouched. Mirror that here so
     // an unset binding shows "unchanged" instead of a phantom "→ —" change.

@@ -5,12 +5,12 @@ use super::backup_before_write;
 use crate::backup::new_stamp;
 use super::util::{
     ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
-    write_json_value,
+    unmanaged_provider_keys, write_json_value,
 };
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
-    agent_write_base_url, assign_catalog_write_keys, resolve_upstream_model_id, AppConfig,
-    ApplyAgentResult, Protocol, Secrets, Store, StoreService,
+    agent_write_base_url, assign_catalog_write_keys_with_reserved, resolve_upstream_model_id,
+    AppConfig, ApplyAgentResult, Protocol, Secrets, Store, StoreService,
 };
 
 pub fn apply(
@@ -45,9 +45,14 @@ pub fn apply(
     let enabled = svc.catalog_providers_with_models(store, "opencode");
     // Unique key per provider (names are globally unique); same map used by
     // preview. Prevents two providers sharing a base_url (diff protocol) from
-    // colliding onto one key and overwriting each other.
-    let write_keys =
-        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+    // colliding onto one key and overwriting each other. Keys also avoid native
+    // (unmanaged) disk keys so a ModelHub provider never takes over a user block
+    // that merely shares the slug.
+    let native_keys = unmanaged_provider_keys(&existing_providers);
+    let write_keys = assign_catalog_write_keys_with_reserved(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        &native_keys,
+    );
     let mut auth = if auth_file.exists() {
         read_json_value(&auth_file)?
     } else {
@@ -83,20 +88,38 @@ pub fn apply(
         store.agent_bindings.opencode.provider_id.as_deref(),
         store.agent_bindings.opencode.model_id.as_deref(),
     ) {
-        if let (Some(slug), Some(upstream)) =
-            (write_keys.get(pid), resolve_upstream_model_id(store, mid))
-        {
-            obj.insert("model".into(), Value::String(format!("{slug}/{upstream}")));
+        // Only write the default `model` when it is actually part of this
+        // provider's synced subset. Otherwise OpenCode would point at a model
+        // that is never written into the block (self-contradictory config).
+        let in_subset = enabled
+            .iter()
+            .find(|(p, _)| p.id == pid)
+            .map(|(_, models)| models.iter().any(|m| m.id == mid))
+            .unwrap_or(false);
+        if in_subset {
+            if let (Some(slug), Some(upstream)) =
+                (write_keys.get(pid), resolve_upstream_model_id(store, mid))
+            {
+                obj.insert("model".into(), Value::String(format!("{slug}/{upstream}")));
+            }
         }
     }
 
     if let Some(small_id) = store.agent_bindings.opencode.small_model_id.as_deref() {
         if let Some(m) = store.models.iter().find(|x| x.id == small_id) {
-            if let Some(slug) = write_keys.get(&m.provider_id) {
-                obj.insert(
-                    "small_model".into(),
-                    Value::String(format!("{slug}/{}", m.model_id)),
-                );
+            // small_model must also be part of its provider's synced subset.
+            let in_subset = enabled
+                .iter()
+                .find(|(p, _)| p.id == m.provider_id)
+                .map(|(_, models)| models.iter().any(|x| x.id == m.id))
+                .unwrap_or(false);
+            if in_subset {
+                if let Some(slug) = write_keys.get(&m.provider_id) {
+                    obj.insert(
+                        "small_model".into(),
+                        Value::String(format!("{slug}/{}", m.model_id)),
+                    );
+                }
             }
         }
     }

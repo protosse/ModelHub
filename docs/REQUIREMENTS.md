@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-29（侧栏可收起为图标栏；跨平台安全写入；恢复轮转保护；配置校验）
+> 最后更新：2026-07-30（代码审查修复：绑定读取隔离 / 写出 key 避让原生 key / 协议匹配两段式 / `/v1` 端点归一 / JSONC 解析 / 默认模型限子集 / 删模型 scrub 目录 / 停止保活最近结果 / Apply 后刷新路径）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -133,7 +133,7 @@ ModelHub 库（持久）
 
 | 能力 | 行为 |
 |------|------|
-| 单模型 | 提示词、超时 5–300s（默认 30）、真实请求；**网络请求日志默认收起**（开始测试 / 回填历史日志均不自动展开，仅用户点「展开」）；**停止**：立即结束 UI 等待并丢弃本轮结果（已发出的 HTTP 无法在客户端强杀，可能仍跑完）；event `test-connection-log` |
+| 单模型 | 提示词、超时 5–300s（默认 30）、真实请求；**网络请求日志默认收起**（开始测试 / 回填历史日志均不自动展开，仅用户点「展开」）；**停止**：立即结束 UI 等待并丢弃本轮进行中结果（已发出的 HTTP 无法在客户端强杀，可能仍跑完），停止后面板回显**该模型上一次已完成的结果**（成功/失败/耗时），不会把这次被取消的跑记为失败；event `test-connection-log` |
 | 关弹窗 | **不中断**；single / batch / multi 模块级 session 保活 |
 | 测试全部 | **串行**（测该 Provider 全部模型，无「仅已启用」过滤）；**停止**：待测立刻标跳过，当前请求跑完后结束会话；行内响应时间：优先本轮 `result.latencyMs`，否则回退 `modelTestResults.latencyMs`（重启后仍显示） |
 | 测试所选 | **全局并发 3**，**同提供商串行**；**停止**：待测立刻标跳过，进行中请求跑完后结束会话；响应时间回退规则同「测试全部」 |
@@ -307,9 +307,9 @@ ModelHub 库（持久）
 - 仅 OC/Pi 详情显示；勾选 Provider / 展开选模型，**任何改动即调 `set_agent_catalog` 落盘并刷新库**  
 - **选模型子集**：Provider 行可展开其模型多选。全勾（= 全部）存空 `modelIds`（保持动态）；取消勾到 **零个模型 = 该 Provider 移出目录**（避免「空=全部」歧义）  
 - 搜索（名称子串）+ **Provider 全选仅作用当前搜索结果**（筛选外已勾保留，与提供商页同语义）  
-- 删除 Provider 时从两个 catalog 列表 scrub 掉该项；`set_agent_catalog` 落盘时去除悬空 provider / model id、按 Provider 去重并保序（模型 ID 不额外去重）
+- 删除 Provider 时从两个 catalog 列表 scrub 掉该项；`set_agent_catalog` 落盘时去除悬空 provider / model id、按 Provider 去重并保序（模型 ID 不额外去重）。**删除模型时** 也从两个 catalog 的 `modelIds` 中 scrub 掉该模型 id；若某条目原本显式只选了该模型、scrub 后变空，则**整条移出目录**（不退化为「空=全部」），与 UI「零个模型 = 移出目录」一致。原本就为空子集（=全部）的条目不动。
 - **迁移**：旧 `store.json` 无 `agentCatalogs` 时，用当时 `enabled=true` 的 Provider 同时种子进 opencode/pi 两列表（`modelIds` 空 = 全部，行为与旧全局 `enabled` 一致）；一旦为 `Some`（即便空列表）不再重新种子。旧版 catalog 的裸 providerId 字符串仍可反序列化（→ 空模型子集 = 全部）  
-- **默认模型限定在同步目录内**：OC/Pi 的默认 Provider 只能从已加入 catalog 的 Provider 选  
+- **默认模型限定在同步目录内**：OC/Pi 的默认 Provider 只能从已加入 catalog 的 Provider 选；默认模型也只能从该 Provider 在同步目录内的**模型子集**选（UI 下拉按子集过滤），避免写出“只同步模型 A 却把默认设成 B”的自相矛盾配置。Apply 侧同样校验：默认模型不在该 Provider 的同步子集内时不写 `model`/`defaultProvider`/`defaultModel`，保留磁盘现值  
 - **新建 / 克隆 Provider 自动加入两个 catalog**（空模型子集 = 全部）；catalog 尚为 `null`（未迁移）时不追加，留待首次 load 迁移种子  
 
 #### 3.4.4 各 Agent 磁盘解读
@@ -317,8 +317,8 @@ ModelHub 库（持久）
 | Agent | 绑定 | 磁盘解读要点 |
 |-------|------|----------------|
 | Claude | 官方/第三方；Provider+Model | BASE_URL 空 → 官方 |
-| Codex | 同上；记录 `providerKey` | `model_provider` 为 openai/空 → 官方；第三方块回匹配 Store 时，OpenAI 系协议将末尾 `/v1` 视为等价，避免 Apply 自动补 `/v1` 后重启显示未匹配 |
-| OpenCode | 默认 Provider+Model（+small） | config `model` 优先，否则 `model.json` recent[0]；受管 Provider 优先按 `_modelhub.providerId` 回匹配 Store |
+| Codex | 同上；记录 `providerKey` | `model_provider` 为 openai/空 → 官方；第三方块回匹配 Store 时，OpenAI 系协议将末尾 `/v1` 视为等价，避免 Apply 自动补 `/v1` 后重启显示未匹配。同一 baseUrl 不同协议的多个 Provider 中精确按协议优先匹配（排序不影响结果），避免回读成错误协议的 Provider |
+| OpenCode | 默认 Provider+Model（+small） | config `model` 优先，否则 `model.json` recent[0]；受管 Provider 优先按 `_modelhub.providerId` 回匹配 Store。配置可为 `.jsonc`，ModelHub 解析时容忍完整 JSONC（行内/整行 `//`、`/* */` 块注释、尾逗号），不因注释导致读取失败 |
 | Pi | 默认 Provider+Model | settings `defaultProvider` / `defaultModel`；受管 Provider 优先按 models.json 的 `_modelhub.providerId` 回匹配 Store，避免写出补 `/v1` 后 URL 文字差异导致重启丢绑定 |
 
 切换 Provider 时 **自动选中该 Provider 下第一个模型**。
@@ -328,8 +328,8 @@ ModelHub 库（持久）
 - **状态点**：进入/草稿/库变化时一次 `preview_apply([], draft)` 拿全部四个 Agent 的 Diff；某 Agent Diff 含非 `same` 行 → 标「有更改」，否则「一致 / 无配置」  
 - **右侧 Diff**：只显示当前选中 Agent（磁盘现状 → Apply 后）  
 - **应用此 Agent**：仅写出当前选中的 Agent；按钮位于右侧详情底部常驻操作栏，不随配置与 Diff 内容滚动
-- 流程：备份 → 写出 → 行内结果 / 重启提示  
-- Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置。
+- 流程：备份 → 写出 → 行内结果 / 重启提示。**Apply 完成后刷新全局路径状态**（`paths.*Exists`）：刚创建/修改的配置文件立即在工作台 Agent 列表显示为「已找到」，不必等下一次操作才刷新  
+- Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置。`read_live_bindings` **按 Agent 独立读取**：单个 Agent 文件损坏只令该 Agent 回退默认绑定，不影响其它 Agent 的草稿，避免“一个损坏文件清空全部绑定、Apply 仍可点”导致的误清空；损坏项的错误仍由该 Agent 的 Preview 报出，Apply 对损坏文件按该 Agent 失败处理而不写入。
 
 #### Diff 规则
 
@@ -341,12 +341,12 @@ ModelHub 库（持久）
   - 仅 Key 变化时，四个 Agent 的更改对比与状态点均会标「有更改」  
 - **字段所有权**：ModelHub 只覆盖 UI 可配置字段及必要的 Agent 映射字段；Agent 原生未知字段不读入 Store、不在 Apply 中凭空重建或清空
 - **Codex 保留式写出**：只更新 `model` / `model_provider` 与所选 `model_providers.<key>` 的名称、base_url、wire_api、token；该块其它字段及其它 Provider 块全部保留；官方模式只切 `model_provider=openai`
-- 写出 Provider key 由 **Provider 名称 slug** 生成（名称全局唯一），写出集内去重（撞名加 `-2`）；**不复用磁盘已有 key**。同一 baseUrl 不同协议的两个 Provider（如 `jianzhile` responses + `jianzhile-cc` anthropic）各得独立 key，不再串块/互相覆盖。Apply 与 Preview 用同一份 key 映射，Diff 与实际写出一致  
+- 写出 Provider key 由 **Provider 名称 slug** 生成（名称全局唯一），写出集内去重（撞名加 `-2`）；**且避开磁盘上未受 ModelHub 管理的原生 Provider key**（撞名同样加 `-2`），使 ModelHub Provider 永不覆盖/接管同名原生块，原生块在取消同步时原样保留。同一 baseUrl 不同协议的两个 Provider（如 `jianzhile` responses + `jianzhile-cc` anthropic）各得独立 key，不再串块/互相覆盖。Apply 与 Preview 用同一份 key 映射（含同一份 native key 避让集），Diff 与实际写出一致  
 - **OC/Pi 模型级 Diff**：对每个同步 Provider，比对磁盘该块已有模型 id 与本次将写出的集合，逐条列出 `+ 新增模型` / `- 不再同步模型`（相同的省略）  
-- **OC/Pi 匹配与保留**：写出 Provider 优先按 `_modelhub.providerId` 匹配磁盘原块（改名/slug 变化仍可继承），找不到时按本次目标 key 匹配。匹配项以磁盘原配置为基础重建：ModelHub 管理字段覆盖，Provider/模型的其它原生扩展字段保留
+- **OC/Pi 匹配与保留**：写出 Provider 优先按 `_modelhub.providerId` 匹配磁盘原块（改名/slug 变化仍可继承），找不到时按本次目标 key 匹配。匹配项以磁盘原配置为基础重建：ModelHub 管理字段覆盖，Provider/模型的其它原生扩展字段保留。由于写出 key 已避开原生 key，目标 key 兜底不会接管用户/其它工具的原生块  
 - **OC/Pi 目录清理**：仅删除退出同步目录的 `_modelhub.managed=true` 受管块；未受 ModelHub 管理的本机/第三方 Provider 块原样保留
-- **OC/Pi 默认模型条件写出**：Apply 仅在绑定草稿 provider+model **均已选** 时才写 OpenCode `model` / Pi `defaultProvider`+`defaultModel`；草稿未选默认时 **不改** 磁盘现值。Preview 与此对齐——草稿未选时该行显示磁盘现值为 unchanged，而非「→ —」的假变更  
-- **baseUrl `/v1` 规范化**：Apply 写出 Codex/OC/Pi 的 baseUrl 时，openai 系协议（completions / responses）自动补 `/v1`（已有则不重复），anthropic 保持裸 URL。与连通性测试的 `api_root` 及取模型行为一致——**测试能通过的模型 Apply 后也能用**
+- **OC/Pi 默认模型条件写出**：Apply 仅在绑定草稿 provider+model **均已选且默认模型属于该 Provider 的同步子集** 时才写 OpenCode `model` / Pi `defaultProvider`+`defaultModel`；草稿未选或模型不在子集内时 **不改** 磁盘现值。Preview 与此对齐——草稿未选时该行显示磁盘现值为 unchanged，而非「→ —」的假变更  
+- **baseUrl `/v1` 规范化**：Apply 写出 Codex/OC/Pi 的 baseUrl 时，openai 系协议（completions / responses）自动补 `/v1`（已有则不重复），anthropic 保持裸 URL。与连通性测试的 `api_root` 及取模型行为一致——**测试能通过的模型 Apply 后也能用**。**导入去重键 `provider_endpoint_key` 对 openai 系协议同样去掉末尾 `/v1`**，使 Store 裸地址与 ModelHub 写回磁盘的 `/v1` 地址视为同一端点，避免重复导入；anthropic 保持全地址
 
 #### 写出规格摘要
 
@@ -357,7 +357,7 @@ ModelHub 库（持久）
 | OpenCode | **catalog(opencode)** 控制 ModelHub 受管块；未受管 Provider 保留。匹配块保留原 `options`、headers 和模型扩展字段，ModelHub 仅覆盖 `npm` / 名称 / baseURL / 同步模型 ID·名称 / `_modelhub`；Key 统一写 `auth.json` 并移除可能优先使用的旧 `options.apiKey`；`mcp`/`plugin` 等其它顶层键不动 |
 | Pi | **catalog(pi)** 控制 ModelHub 受管块；未受管 Provider 保留。匹配块保留 headers、compat、模型 reasoning/上下文等扩展字段，ModelHub 仅覆盖 baseUrl / api / apiKey / authHeader / 同步模型 ID·名称 / `_modelhub`；新 Provider 或原块缺少 UA 时补 `User-Agent: pi-coding-agent`，已有 UA 保留；settings 其它键不动 |
 
-> **只管理自己的部分**：OC/Pi 写出块带 `_modelhub.managed` 标记。取消同步时只清理此类受管块，不删除用户/其它工具的未受管 Provider。同步目录内按 `_modelhub.providerId` 优先、目标 key 兜底匹配磁盘块，并保留 ModelHub 未管理的 Provider/模型原生字段。OpenCode 的 `auth.json` 为追加式（只加不删），可能残留无用 key，无害。
+> **只管理自己的部分**：OC/Pi 写出块带 `_modelhub.managed` 标记。取消同步时只清理此类受管块，不删除用户/其它工具的未受管 Provider。同步目录内按 `_modelhub.providerId` 优先、目标 key 兜底匹配磁盘块，并保留 ModelHub 未管理的 Provider/模型原生字段。写出 key 避让磁盘上未受管 key，避免接管同名原生块。OpenCode 的 `auth.json` 为追加式（只加不删），可能残留无用 key，无害。
 
 ### 3.6 备份
 
@@ -611,3 +611,4 @@ src-tauri/src/
 | 2026-07-29 | 修复 Codex 第三方 Provider 回读匹配：OpenAI completions/responses 的 Store 裸 baseUrl 与磁盘自动补 `/v1` 地址视为等价；避免 `model_provider=custom` 明明对应库内 Provider/Model，却在 Agent 工作台显示未匹配、Preview 误报 Provider `?` 与 Key 缺失。 |
 | 2026-07-29 | 收敛 Agent 应用入口：移除全局页头「应用更改」和工作台「应用全部更改」；仅保留逐 Agent 应用，并将「应用此 Agent」放入右侧详情底部常驻操作栏，滚动配置/Diff 时持续可见。 |
 | 2026-07-29 | 左侧主导航支持收起为仅图标栏（约 56px），展开为图标+文案；收起偏好 localStorage 持久化。 |
+| 2026-07-30 | 代码审查修复（详见对应章节）：①`read_live_bindings` 按 Agent 独立读取，单文件损坏不再清空全部草稿；②写出 key 避让磁盘上未受管原生 key，不再接管同名原生块、取消同步不再删原生块；③回匹配按协议两段式（精确协议优先、`/v1` 归一兑底、纯 base 兜底），排序不影响结果；④导入去重键 `provider_endpoint_key` 对 openai 系协议去掉末尾 `/v1`，与写出 `/v1` 地址视为同一端点，修复重复导入；⑤OpenCode `.jsonc` 解析容忍完整 JSONC（行内/块注释、尾逗号）；⑥默认模型下拉与 Apply 均限定在该 Provider 的同步模型子集内；⑦删除模型时 scrub 两个 catalog 的 `modelIds`，显式子集清空则整条移出目录（不退化为“全部”）；⑧单模型测试停止后面板回显上一次已完成结果，不把取消的跑记为失败；⑨Apply 完成后刷新全局 `paths.*Exists`，立即显示已找到。 |

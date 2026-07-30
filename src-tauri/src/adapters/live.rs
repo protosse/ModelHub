@@ -13,11 +13,21 @@ use fs_err as fs;
 /// (matched against known providers/models in the store when possible).
 pub fn read_live_bindings(svc: &StoreService, config: &AppConfig) -> Result<AgentBindings> {
     let store = svc.load_store()?;
+    // Read each agent independently: one corrupt agent file must not blank the
+    // other agents' drafts (which an earlier `?`-aggregated read did, leaving
+    // Apply enabled over default/empty bindings). A per-agent parse failure falls
+    // back to that agent's defaults here; preview_apply still re-reads disk and
+    // reports a parse error for the broken agent, and Apply fails gracefully per
+    // agent, so the user is never silently pushed into wiping good config.
+    let claude = live_claude(config, &store).unwrap_or_default();
+    let codex = live_codex(config, &store).unwrap_or_default();
+    let opencode = live_opencode(config, &store).unwrap_or_default();
+    let pi = live_pi(config, &store).unwrap_or_default();
     Ok(AgentBindings {
-        claude: live_claude(config, &store)?,
-        codex: live_codex(config, &store)?,
-        opencode: live_opencode(config, &store)?,
-        pi: live_pi(config, &store)?,
+        claude,
+        codex,
+        opencode,
+        pi,
     })
 }
 
@@ -351,20 +361,35 @@ fn match_provider_model(
     let endpoint = provider_endpoint_key(&base, &protocol);
     let comparable_base = provider_base_for_match(&base, &protocol);
 
-    let provider = store.providers.iter().find(|p| {
-        let pe = provider_endpoint_key(&p.base_url, &p.protocol);
-        if pe == endpoint {
-            return true;
-        }
-        let provider_base = provider_base_for_match(&p.base_url, &p.protocol);
-        if p.protocol == protocol && provider_base == comparable_base {
-            return true;
-        }
-        if loose_protocol && provider_base == comparable_base {
-            return true;
-        }
-        false
-    });
+    // Match in distinct passes so iteration order never picks the wrong provider:
+    //   1. exact endpoint (base + protocol)
+    //   2. same protocol after stripping a `/v1` suffix on OpenAI-style URLs
+    //      (Apply auto-appends `/v1`, so disk may carry it while the Store does
+    //      not)
+    //   3. loose base-only fallback (only when explicitly requested) — used when
+    //      the on-disk protocol is a guess that may not match the Store value.
+    // Previously all three checks lived in one `.find()`, so a completions
+    // provider sorted before a responses provider could win the loose branch
+    // even when the disk protocol was responses, returning the wrong API key.
+    let provider = store
+        .providers
+        .iter()
+        .find(|p| provider_endpoint_key(&p.base_url, &p.protocol) == endpoint)
+        .or_else(|| {
+            store.providers.iter().find(|p| {
+                p.protocol == protocol
+                    && provider_base_for_match(&p.base_url, &p.protocol) == comparable_base
+            })
+        })
+        .or_else(|| {
+            if loose_protocol {
+                store.providers.iter().find(|p| {
+                    provider_base_for_match(&p.base_url, &p.protocol) == comparable_base
+                })
+            } else {
+                None
+            }
+        });
 
     let provider_id = provider.map(|p| p.id.clone());
     let model_id = match (provider, upstream_model) {
@@ -522,5 +547,46 @@ mod tests {
             matched,
             (Some("prov_zzzcoding".into()), Some("mdl_sol".into()))
         );
+    }
+
+    #[test]
+    fn match_provider_model_prefers_exact_protocol_regardless_of_order() {
+        // Two providers share the same base URL but differ by protocol. The
+        // disk block is responses. The completions provider sorts first in the
+        // store. The old single-`.find()` loose branch would wrongly return the
+        // completions provider; the two-pass match must pick responses.
+        let mut store = Store::default();
+        store.providers.push(Provider {
+            id: "prov_completions".into(),
+            name: "Completions".into(),
+            base_url: "https://shared.example.com".into(),
+            protocol: Protocol::OpenaiCompletions,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_c".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+        store.providers.push(Provider {
+            id: "prov_responses".into(),
+            name: "Responses".into(),
+            base_url: "https://shared.example.com".into(),
+            protocol: Protocol::OpenaiResponses,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_r".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        });
+
+        let matched = match_provider_model(
+            &store,
+            "https://shared.example.com",
+            Protocol::OpenaiResponses,
+            None,
+            true,
+        );
+
+        assert_eq!(matched.0.as_deref(), Some("prov_responses"));
     }
 }

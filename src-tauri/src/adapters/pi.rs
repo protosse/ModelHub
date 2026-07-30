@@ -5,12 +5,12 @@ use super::backup_before_write;
 use crate::backup::new_stamp;
 use super::util::{
     ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
-    write_json_value,
+    unmanaged_provider_keys, write_json_value,
 };
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
-    agent_write_base_url, assign_catalog_write_keys, find_provider, resolve_upstream_model_id,
-    AppConfig, ApplyAgentResult, Protocol, Secrets, Store, StoreService,
+    agent_write_base_url, assign_catalog_write_keys_with_reserved, find_provider,
+    resolve_upstream_model_id, AppConfig, ApplyAgentResult, Protocol, Secrets, Store, StoreService,
 };
 
 pub fn apply(
@@ -45,9 +45,14 @@ pub fn apply(
     let enabled = svc.catalog_providers_with_models(store, "pi");
     // Unique key per provider (names are globally unique); same map used by
     // preview. Prevents two providers sharing a base_url (diff protocol) from
-    // colliding onto one key and overwriting each other.
-    let write_keys =
-        assign_catalog_write_keys(&enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+    // colliding onto one key and overwriting each other. Keys also avoid native
+    // (unmanaged) disk keys so a ModelHub provider never takes over a user block
+    // that merely shares the slug.
+    let native_keys = unmanaged_provider_keys(&existing_providers);
+    let write_keys = assign_catalog_write_keys_with_reserved(
+        &enabled.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        &native_keys,
+    );
     for (provider, models) in &enabled {
         let slug = write_keys.get(&provider.id).cloned().unwrap_or_default();
         let api_key = secrets
@@ -72,13 +77,22 @@ pub fn apply(
         store.agent_bindings.pi.provider_id.as_deref(),
         store.agent_bindings.pi.model_id.as_deref(),
     ) {
-        if let (Some(p), Some(upstream)) = (
-            find_provider(store, pid),
-            resolve_upstream_model_id(store, mid),
-        ) {
-            let slug = write_keys.get(&p.id).cloned().unwrap_or_default();
-            settings_obj.insert("defaultProvider".into(), Value::String(slug));
-            settings_obj.insert("defaultModel".into(), Value::String(upstream));
+        // Only write defaults when the model is part of this provider's synced
+        // subset, so Pi never points at a model that is never written into the
+        // block (self-contradictory config).
+        let in_subset = enabled
+            .iter()
+            .find(|(p, _)| p.id == pid)
+            .map(|(_, models)| models.iter().any(|m| m.id == mid))
+            .unwrap_or(false);
+        if in_subset {
+            if let (Some(p), Some(upstream)) =
+                (find_provider(store, pid), resolve_upstream_model_id(store, mid))
+            {
+                let slug = write_keys.get(&p.id).cloned().unwrap_or_default();
+                settings_obj.insert("defaultProvider".into(), Value::String(slug));
+                settings_obj.insert("defaultModel".into(), Value::String(upstream));
+            }
         }
     }
     write_json_value(&settings_file, &settings)?;

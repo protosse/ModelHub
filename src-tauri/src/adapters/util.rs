@@ -13,8 +13,12 @@ pub fn read_json_value(path: &Path) -> Result<Value> {
     if text.trim().is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
     }
-    // strip simple // comments for jsonc-ish files
-    let cleaned = strip_json_line_comments(&text);
+    // strip comments (line // incl. trailing, block /* */) and trailing commas
+    // for jsonc-ish files. Real OpenCode/Pi JSONC commonly carries trailing
+    // comments, block comments and trailing commas; the old full-line-only
+    // stripper failed those, which then cascaded into a blanked bindings read.
+    let cleaned = strip_jsonc_comments(&text);
+    let cleaned = strip_trailing_commas(&cleaned);
     serde_json::from_str(&cleaned).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -26,16 +30,101 @@ pub fn write_json_value(path: &Path, value: &Value) -> Result<()> {
     write_atomic(path, format!("{text}\n").as_bytes())
 }
 
-pub fn strip_json_line_comments(input: &str) -> String {
+/// Strip `//` line comments (full-line or trailing) and `/* */` block
+/// comments from JSONC-ish text, while leaving string literals untouched.
+/// `//` or `/*` inside a JSON string are preserved verbatim.
+pub fn strip_jsonc_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
-    for line in input.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") {
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            if c == b'\\' && i + 1 < bytes.len() {
+                // copy the escaped char verbatim (e.g. \/, ", \n)
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
             continue;
         }
-        // keep lines; naive strip trailing // outside strings is complex — only skip full-line comments
-        out.push_str(line);
-        out.push('\n');
+        if c == b'"' {
+            in_string = true;
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            // line comment: skip to end of line (keep the newline)
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            // block comment: skip to closing */
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
+/// Remove trailing commas before `}` or `]`, string-aware. JSONC allows them;
+/// `serde_json` does not.
+pub fn strip_trailing_commas(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            if c == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b',' {
+            // peek ahead, skipping whitespace, to see if the next significant
+            // char closes a struct/array — if so, drop the comma.
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c as char);
+        i += 1;
     }
     out
 }
@@ -83,6 +172,17 @@ pub fn is_modelhub_managed_provider(value: &Value) -> bool {
 
 pub fn retain_unmanaged_provider_entries(providers: &mut Map<String, Value>) {
     providers.retain(|_, value| !is_modelhub_managed_provider(value));
+}
+
+/// Keys of provider blocks on disk that are NOT managed by ModelHub. Generated
+/// write keys avoid these so a ModelHub provider never overwrites or takes over
+/// a native/user block that merely happens to share the slug.
+pub fn unmanaged_provider_keys(providers: &Map<String, Value>) -> std::collections::HashSet<String> {
+    providers
+        .iter()
+        .filter(|(_, value)| !is_modelhub_managed_provider(value))
+        .map(|(key, _)| key.clone())
+        .collect()
 }
 
 pub fn set_string_path(obj: &mut serde_json::Map<String, Value>, path: &[&str], val: String) {
@@ -155,5 +255,26 @@ mod tests {
 
         assert!(!providers.contains_key("managed"));
         assert_eq!(providers["native"]["headers"]["X-Native"], "keep");
+    }
+
+    #[test]
+    fn jsonc_strips_line_and_trailing_comments_and_trailing_commas() {
+        let jsonc = r#"{
+            // full-line comment
+            "a": 1, // trailing comment
+            /* block
+               comment */ "b": "str // not a comment", /* inline block */
+            "c": [1, 2, 3,],
+            "d": {"x": 1,},
+        }"#;
+
+        let cleaned = strip_jsonc_comments(jsonc);
+        let cleaned = strip_trailing_commas(&cleaned);
+        let val: Value = serde_json::from_str(&cleaned).expect("jsonc must parse after strip");
+
+        assert_eq!(val["a"], 1);
+        assert_eq!(val["b"], "str // not a comment");
+        assert_eq!(val["c"].as_array().unwrap().len(), 3);
+        assert_eq!(val["d"]["x"], 1);
     }
 }
