@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Layout } from "./components/Layout";
+import { QuickAddProviderModal } from "./components/QuickAddProviderModal";
 import { AgentWorkbenchPage } from "./pages/AgentWorkbenchPage";
 import { BackupsPage } from "./pages/BackupsPage";
 import { ImportPage } from "./pages/ImportPage";
@@ -26,6 +27,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [draftBindings, setDraftBindings] = useState<AgentBindings | null>(null);
   const [focusProviderId, setFocusProviderId] = useState<string | null>(null);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
 
   const toastTimer = useRef<ReturnType<typeof window.setTimeout>>(null);
   const showToast = useCallback((msg: string) => {
@@ -96,11 +98,13 @@ export default function App() {
   }
 
   return (
-    <Layout
-      page={page}
-      onNavigate={navigate}
-      toast={toast}
-    >
+    <>
+      <Layout
+        page={page}
+        onNavigate={navigate}
+        onQuickAdd={() => setQuickAddOpen(true)}
+        toast={toast}
+      >
       {/* Mount once on first visit, then keep alive across tab switches. */}
       {visited.has("providers") ? (
         <div className={pagePaneClass(page === "providers")}>
@@ -169,6 +173,24 @@ export default function App() {
           />
         </div>
       ) : null}
-    </Layout>
+      </Layout>
+      {quickAddOpen ? (
+        <QuickAddProviderModal
+          bindings={draftBindings}
+          onClose={() => setQuickAddOpen(false)}
+          onCommitted={async (result) => {
+            setDraftBindings(result.bindings);
+            await refresh();
+            const failed = result.apply.results.filter((item) => !item.ok).length;
+            showToast(
+              failed > 0
+                ? `提供商已保存，${failed} 个 Agent 应用失败`
+                : `已添加 ${result.models.length} 个模型并应用成功`,
+            );
+            if (failed === 0) setQuickAddOpen(false);
+          }}
+        />
+      ) : null}
+    </>
   );
 }

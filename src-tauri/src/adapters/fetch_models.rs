@@ -14,8 +14,18 @@ pub async fn fetch_remote_models(
         .get(&provider.secret_ref)
         .map(|s| s.api_key.as_str())
         .unwrap_or("");
+    fetch_remote_models_from_input(&provider.base_url, &provider.protocol, api_key).await
+}
 
-    let base = provider.base_url.trim_end_matches('/');
+pub async fn fetch_remote_models_from_input(
+    base_url: &str,
+    protocol: &Protocol,
+    api_key: &str,
+) -> Result<Vec<RemoteModel>> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        anyhow::bail!("Base URL 不能为空");
+    }
     let url = if base.ends_with("/v1") {
         format!("{base}/models")
     } else {
@@ -28,7 +38,7 @@ pub async fn fetch_remote_models(
 
     let mut req = client.get(&url);
     if !api_key.is_empty() {
-        req = match provider.protocol {
+        req = match protocol {
             Protocol::AnthropicMessages => req
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")

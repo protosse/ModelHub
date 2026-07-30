@@ -31,6 +31,8 @@ pub fn run() {
             commands::restore_backup,
             commands::reveal_api_key,
             commands::fetch_provider_models,
+            commands::fetch_models_from_provider_input,
+            commands::quick_add_and_apply,
             commands::set_agent_catalog,
             commands::delete_providers,
             commands::list_test_prompts,

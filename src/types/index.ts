@@ -182,6 +182,26 @@ export type ApplyResult = {
   readonly results: readonly ApplyAgentResult[];
 };
 
+export type QuickAddAgent = "claude" | "codex" | "opencode" | "pi";
+
+export type QuickAddRequest = {
+  readonly provider: ProviderInput;
+  readonly models: readonly {
+    readonly modelId: string;
+    readonly displayName: string;
+  }[];
+  readonly defaultModelId: string;
+  readonly agents: readonly QuickAddAgent[];
+  readonly bindings?: AgentBindings | null;
+};
+
+export type QuickAddResult = {
+  readonly provider: Provider;
+  readonly models: readonly Model[];
+  readonly bindings: AgentBindings;
+  readonly apply: ApplyResult;
+};
+
 export type ImportPreviewItem = {
   readonly id: string;
   readonly source: string;

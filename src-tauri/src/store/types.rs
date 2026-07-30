@@ -404,6 +404,33 @@ pub struct ModelInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FetchModelsInput {
+    pub base_url: String,
+    pub protocol: Protocol,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddModelInput {
+    pub model_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddRequest {
+    pub provider: ProviderInput,
+    pub models: Vec<QuickAddModelInput>,
+    pub default_model_id: String,
+    pub agents: Vec<String>,
+    #[serde(default)]
+    pub bindings: Option<AgentBindings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyRequest {
     #[serde(default)]
     pub agents: Vec<String>,
@@ -425,6 +452,15 @@ pub struct ApplyAgentResult {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResult {
     pub results: Vec<ApplyAgentResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddResult {
+    pub provider: Provider,
+    pub models: Vec<Model>,
+    pub bindings: AgentBindings,
+    pub apply: ApplyResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

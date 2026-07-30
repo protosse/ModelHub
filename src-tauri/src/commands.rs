@@ -2,10 +2,10 @@ use crate::adapters;
 use crate::backup::{self, BackupEntry, BackupSnapshotRef, RestoreBackupResult};
 use crate::paths::ModelHubPaths;
 use crate::store::{
-    AgentBindings, ApplyRequest, ApplyResult, CatalogEntry, FullState, ImportPreview,
-    ImportRequest, ImportResult, Model, ModelInput, ModelTestResult, Provider, ProviderInput,
-    RemoteModel, StoreService, TestConnectionRequest, TestConnectionResult, TestPrompt,
-    TestPromptInput,
+    AgentBindings, AgentMode, ApplyRequest, ApplyResult, CatalogEntry, FetchModelsInput, FullState,
+    ImportPreview, ImportRequest, ImportResult, Model, ModelInput, ModelTestResult, Provider,
+    ProviderInput, QuickAddRequest, QuickAddResult, RemoteModel, StoreService,
+    TestConnectionRequest, TestConnectionResult, TestPrompt, TestPromptInput,
 };
 
 fn svc() -> Result<(StoreService, ModelHubPaths), String> {
@@ -163,6 +163,92 @@ pub async fn fetch_provider_models(provider_id: String) -> Result<Vec<RemoteMode
     adapters::fetch_remote_models(&store, &secrets, &provider_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn fetch_models_from_provider_input(
+    input: FetchModelsInput,
+) -> Result<Vec<RemoteModel>, String> {
+    adapters::fetch_remote_models_from_input(&input.base_url, &input.protocol, &input.api_key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn quick_add_and_apply(request: QuickAddRequest) -> Result<QuickAddResult, String> {
+    let (svc, paths) = svc()?;
+    let valid_agents = ["claude", "codex", "opencode", "pi"];
+    if request.agents.is_empty() {
+        return Err("请至少选择一个 Agent".into());
+    }
+    if let Some(agent) = request
+        .agents
+        .iter()
+        .find(|agent| !valid_agents.contains(&agent.as_str()))
+    {
+        return Err(format!("unknown agent: {agent}"));
+    }
+
+    let config = svc.load_config().map_err(|e| e.to_string())?;
+    let mut bindings = match request.bindings {
+        Some(bindings) => bindings,
+        None => adapters::read_live_bindings(&svc, &config).map_err(|e| e.to_string())?,
+    };
+    let default_model_id = request.default_model_id.trim().to_string();
+    if default_model_id.is_empty()
+        || !request
+            .models
+            .iter()
+            .any(|model| model.model_id.trim() == default_model_id)
+    {
+        return Err("默认模型不在待添加模型中".into());
+    }
+    let agents = request.agents;
+    let (provider, models) = svc
+        .quick_add_provider(request.provider, request.models, &agents)
+        .map_err(|e| e.to_string())?;
+    let model_row_id = models
+        .iter()
+        .find(|model| model.model_id == default_model_id)
+        .map(|model| model.id.clone())
+        .ok_or_else(|| "默认模型不在待添加模型中".to_string())?;
+    let selected = |agent: &str| agents.iter().any(|item| item == agent);
+
+    if selected("claude") {
+        bindings.claude.mode = AgentMode::ThirdParty;
+        bindings.claude.provider_id = Some(provider.id.clone());
+        bindings.claude.model_id = Some(model_row_id.clone());
+    }
+    if selected("codex") {
+        bindings.codex.mode = AgentMode::ThirdParty;
+        bindings.codex.provider_id = Some(provider.id.clone());
+        bindings.codex.model_id = Some(model_row_id.clone());
+    }
+    if selected("opencode") {
+        bindings.opencode.provider_id = Some(provider.id.clone());
+        bindings.opencode.model_id = Some(model_row_id.clone());
+    }
+    if selected("pi") {
+        bindings.pi.provider_id = Some(provider.id.clone());
+        bindings.pi.model_id = Some(model_row_id);
+    }
+
+    let apply = adapters::apply_all(
+        &svc,
+        &paths,
+        ApplyRequest {
+            agents,
+            bindings: Some(bindings.clone()),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(QuickAddResult {
+        provider,
+        models,
+        bindings,
+        apply,
+    })
 }
 
 #[tauri::command]

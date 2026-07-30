@@ -194,6 +194,112 @@ impl StoreService {
         Ok(provider)
     }
 
+    /// Create a provider and its initial model set in one Store/Secrets commit.
+    /// Unlike the regular create flow, quick add only joins the OC/Pi catalogs
+    /// explicitly selected by the user.
+    pub fn quick_add_provider(
+        &self,
+        input: ProviderInput,
+        model_inputs: Vec<QuickAddModelInput>,
+        agents: &[String],
+    ) -> Result<(Provider, Vec<Model>)> {
+        let mut store = self.load_store()?;
+        let mut secrets = self.load_secrets()?;
+        let name = input.name.trim().to_string();
+        let base_url = normalize_base_url(&input.base_url);
+        if name.is_empty() {
+            anyhow::bail!("提供商名称不能为空");
+        }
+        if base_url.is_empty() {
+            anyhow::bail!("Base URL 不能为空");
+        }
+        if input.api_key.trim().is_empty() {
+            anyhow::bail!("API Key 不能为空");
+        }
+        if model_inputs.is_empty() {
+            anyhow::bail!("请至少添加一个模型");
+        }
+        if store
+            .providers
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            anyhow::bail!("提供商名称已存在：{name}");
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for model in &model_inputs {
+            let id = model.model_id.trim();
+            if id.is_empty() {
+                anyhow::bail!("Model ID 不能为空");
+            }
+            if !seen.insert(id.to_string()) {
+                anyhow::bail!("存在重复模型：{id}");
+            }
+        }
+
+        let now = now_iso();
+        let secret_ref = format!("sec_{}", Uuid::new_v4());
+        let provider = Provider {
+            id: format!("prov_{}", Uuid::new_v4()),
+            name,
+            base_url,
+            protocol: input.protocol,
+            enabled: input.enabled,
+            notes: input.notes,
+            secret_ref: secret_ref.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let models: Vec<Model> = model_inputs
+            .into_iter()
+            .map(|input| {
+                let model_id = input.model_id.trim().to_string();
+                Model {
+                    id: format!("mdl_{}", Uuid::new_v4()),
+                    provider_id: provider.id.clone(),
+                    display_name: if input.display_name.trim().is_empty() {
+                        model_id.clone()
+                    } else {
+                        input.display_name.trim().to_string()
+                    },
+                    model_id,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                }
+            })
+            .collect();
+
+        store.providers.push(provider.clone());
+        store.models.extend(models.iter().cloned());
+        let selected = |agent: &str| agents.iter().any(|item| item == agent);
+        if selected("opencode") {
+            if let Some(entries) = store.agent_catalogs.opencode.as_mut() {
+                entries.push(CatalogEntry {
+                    provider_id: provider.id.clone(),
+                    model_ids: Vec::new(),
+                });
+            }
+        }
+        if selected("pi") {
+            if let Some(entries) = store.agent_catalogs.pi.as_mut() {
+                entries.push(CatalogEntry {
+                    provider_id: provider.id.clone(),
+                    model_ids: Vec::new(),
+                });
+            }
+        }
+        secrets.secrets.insert(
+            secret_ref,
+            SecretEntry {
+                api_key: input.api_key.trim().to_string(),
+                updated_at: now,
+            },
+        );
+        self.save_store_and_secrets(&store, &secrets)?;
+        Ok((provider, models))
+    }
+
     pub fn update_provider(&self, id: &str, input: ProviderInput) -> Result<Provider> {
         let mut store = self.load_store()?;
         let mut secrets = self.load_secrets()?;
@@ -1045,6 +1151,41 @@ mod tests {
             .is_err());
 
         assert_eq!(svc.load_secrets().unwrap().secrets["sec_1"].api_key, "old");
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
+    fn quick_add_only_joins_selected_agent_catalogs() {
+        let svc = service("quick-add-catalogs");
+        let (created, models) = svc
+            .quick_add_provider(
+                provider("quick"),
+                vec![
+                    QuickAddModelInput {
+                        model_id: "model-a".into(),
+                        display_name: "Model A".into(),
+                    },
+                    QuickAddModelInput {
+                        model_id: "model-b".into(),
+                        display_name: String::new(),
+                    },
+                ],
+                &["opencode".into()],
+            )
+            .unwrap();
+
+        let store = svc.load_store().unwrap();
+        let opencode = store.agent_catalogs.opencode.unwrap();
+        let pi = store.agent_catalogs.pi.unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|model| model.provider_id == created.id));
+        assert!(opencode.iter().any(|entry| entry.provider_id == created.id));
+        assert!(!pi.iter().any(|entry| entry.provider_id == created.id));
+        assert_eq!(
+            svc.load_secrets().unwrap().secrets[&created.secret_ref].api_key,
+            "key-quick"
+        );
+
         fs::remove_dir_all(&svc.paths.root).unwrap();
     }
 

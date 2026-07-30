@@ -9,7 +9,7 @@ mod preview;
 mod test_connection;
 mod util;
 
-pub use fetch_models::fetch_remote_models;
+pub use fetch_models::{fetch_remote_models, fetch_remote_models_from_input};
 pub use import::{import_from_agents, preview_import};
 pub use live::read_live_bindings;
 pub use preview::{preview_apply, ApplyPreview};

@@ -10,6 +10,19 @@ type NavItem = {
   readonly icon: React.ReactNode;
 };
 
+function IconPlus({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 5v14M5 12h14"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function IconProviders({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -149,11 +162,12 @@ function readCollapsedPreference(): boolean {
 type Props = {
   readonly page: PageId;
   readonly onNavigate: (page: PageId) => void;
+  readonly onQuickAdd: () => void;
   readonly toast: string | null;
   readonly children: React.ReactNode;
 };
 
-export function Layout({ page, onNavigate, toast, children }: Props) {
+export function Layout({ page, onNavigate, onQuickAdd, toast, children }: Props) {
   const [collapsed, setCollapsed] = useState(readCollapsedPreference);
 
   const toggleCollapsed = useCallback(() => {
@@ -199,6 +213,21 @@ export function Layout({ page, onNavigate, toast, children }: Props) {
         </div>
 
         <nav className={"flex flex-1 flex-col gap-0.5 " + navPad}>
+          <button
+            type="button"
+            title="快速添加提供商"
+            aria-label="快速添加提供商"
+            className={
+              collapsed
+                ? "mb-1 flex items-center justify-center rounded-md bg-accent/15 px-0 py-2.5 text-accent hover:bg-accent/25"
+                : "mb-1 flex items-center gap-2.5 rounded-md bg-accent/15 px-3 py-2 text-left text-sm font-medium text-accent hover:bg-accent/25"
+            }
+            onClick={onQuickAdd}
+          >
+            <IconPlus className={iconClass} />
+            {collapsed ? null : <span className="truncate">快速添加</span>}
+          </button>
+          <div className="mb-1 border-t border-surface-3" />
           {NAV.map((item) => {
             const active = page === item.id;
             const base = collapsed

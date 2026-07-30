@@ -13,6 +13,8 @@ import type {
   ModelInput,
   Provider,
   ProviderInput,
+  QuickAddRequest,
+  QuickAddResult,
   RemoteModel,
   ModelTestResult,
   TestConnectionResult,
@@ -159,6 +161,25 @@ export async function revealApiKey(secretRef: string): Promise<string> {
 
 export async function fetchProviderModels(providerId: string): Promise<readonly RemoteModel[]> {
   return invoke("fetch_provider_models", { providerId });
+}
+
+export async function fetchModelsFromProviderInput(input: {
+  readonly baseUrl: string;
+  readonly protocol: ProviderInput["protocol"];
+  readonly apiKey: string;
+}): Promise<readonly RemoteModel[]> {
+  return invoke("fetch_models_from_provider_input", { input });
+}
+
+export async function quickAddAndApply(request: QuickAddRequest): Promise<QuickAddResult> {
+  return invoke("quick_add_and_apply", {
+    request: {
+      ...request,
+      models: [...request.models],
+      agents: [...request.agents],
+      bindings: request.bindings ?? null,
+    },
+  });
 }
 
 export async function deleteProviders(ids: readonly string[]): Promise<number> {
