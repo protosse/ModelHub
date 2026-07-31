@@ -23,6 +23,23 @@ const AGENTS: readonly { id: QuickAddAgent; label: string }[] = [
   { id: "pi", label: "Pi" },
 ];
 
+const SELECTED_AGENTS_KEY = "modelhub.quickAdd.agents";
+const VALID_AGENT_IDS = new Set<QuickAddAgent>(AGENTS.map((item) => item.id));
+
+function readSelectedAgents(): ReadonlySet<QuickAddAgent> {
+  try {
+    const raw = localStorage.getItem(SELECTED_AGENTS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter((item): item is QuickAddAgent => VALID_AGENT_IDS.has(item as QuickAddAgent)),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props) {
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -38,7 +55,7 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [defaultModelId, setDefaultModelId] = useState("");
   const [manualId, setManualId] = useState("");
-  const [agents, setAgents] = useState<ReadonlySet<QuickAddAgent>>(() => new Set());
+  const [agents, setAgents] = useState<ReadonlySet<QuickAddAgent>>(readSelectedAgents);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<QuickAddResult | null>(null);
@@ -133,6 +150,9 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      try {
+        localStorage.setItem(SELECTED_AGENTS_KEY, JSON.stringify([...next]));
+      } catch {}
       return next;
     });
   };
@@ -220,7 +240,7 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
   return (
     <Modal onClose={() => !busy && onClose()} xwide>
       <h3 className="text-base font-semibold">快速添加提供商</h3>
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      <div className="mt-3 grid grid-cols-2 gap-3">
         <div>
           <label className="label">名称</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
@@ -240,25 +260,15 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
         </div>
         <div className="col-span-2">
           <label className="label">Base URL</label>
-          <div className="flex gap-2">
-            <input
-              className="input min-w-0 font-mono"
-              value={baseUrl}
-              onChange={(e) => {
-                clearFetchedModels();
-                setBaseUrl(e.target.value);
-              }}
-              placeholder="https://api.example.com"
-            />
-            <button
-              type="button"
-              className="btn-secondary shrink-0"
-              disabled={!baseUrl.trim() || fetching}
-              onClick={() => void fetchModels()}
-            >
-              {fetching ? "获取中…" : "获取模型"}
-            </button>
-          </div>
+          <input
+            className="input min-w-0 font-mono"
+            value={baseUrl}
+            onChange={(e) => {
+              clearFetchedModels();
+              setBaseUrl(e.target.value);
+            }}
+            placeholder="https://api.example.com"
+          />
         </div>
         <div className="col-span-2">
           <label className="label">API Key</label>
@@ -275,15 +285,23 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
             <button type="button" className="btn-secondary shrink-0" onClick={() => setShowKey((v) => !v)}>
               {showKey ? "隐藏" : "显示"}
             </button>
+            <button
+              type="button"
+              className="btn-secondary shrink-0"
+              disabled={!baseUrl.trim() || fetching}
+              onClick={() => void fetchModels()}
+            >
+              {fetching ? "获取中…" : "获取模型"}
+            </button>
           </div>
         </div>
         <div className="col-span-2">
           <label className="label">备注</label>
-          <textarea className="input min-h-16" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <textarea className="input min-h-10" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </div>
       </div>
 
-      <div className="mt-5 border-t border-surface-3 pt-4">
+      <div className="mt-4 border-t border-surface-3 pt-3">
         <div className="flex items-center justify-between gap-3">
           <h4 className="text-sm font-medium">添加模型</h4>
           <span className="text-xs text-ink-3">已选 {selectedIds.size}</span>
@@ -318,7 +336,7 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
                 {allFilteredSelected ? "取消当前" : "全选当前"}
               </button>
             </div>
-            <div className="mt-2 max-h-44 overflow-auto rounded-md border border-surface-3">
+            <div className="mt-2 max-h-36 overflow-auto rounded-md border border-surface-3">
               {filtered.map((model) => (
                 <label key={model.id} className="flex items-center gap-2 border-b border-surface-3 px-3 py-2 text-sm last:border-b-0 hover:bg-surface-2">
                   <input type="checkbox" checked={selectedIds.has(model.id)} onChange={() => toggleModel(model.id)} />
@@ -343,11 +361,11 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
         ) : null}
       </div>
 
-      <div className="mt-5 border-t border-surface-3 pt-4">
+      <div className="mt-4 border-t border-surface-3 pt-3">
         <h4 className="text-sm font-medium">应用到 Agent</h4>
         <div className="mt-2 grid grid-cols-2 gap-2">
           {AGENTS.map((agent) => (
-            <label key={agent.id} className="flex items-center gap-2 rounded-md border border-surface-3 px-3 py-2 text-sm hover:bg-surface-2">
+            <label key={agent.id} className="flex items-center gap-2 rounded-md border border-surface-3 px-3 py-1.5 text-sm hover:bg-surface-2">
               <input type="checkbox" checked={agents.has(agent.id)} onChange={() => toggleAgent(agent.id)} />
               <span>{agent.label}</span>
               {agent.id === "codex" && protocol !== "openai-responses" ? (
@@ -359,7 +377,7 @@ export function QuickAddProviderModal({ bindings, onClose, onCommitted }: Props)
       </div>
 
       {err ? <div className="mt-3 text-sm text-danger">{err}</div> : null}
-      <div className="mt-5 flex justify-end gap-2">
+      <div className="sticky bottom-0 -mx-5 -mb-5 mt-4 flex justify-end gap-2 border-t border-surface-3 bg-surface-1 px-5 py-3">
         <button type="button" className="btn-secondary" disabled={busy} onClick={onClose}>取消</button>
         <button type="button" className="btn-primary" disabled={busy} onClick={() => void submit()}>
           {busy ? "保存并应用中…" : "保存并应用"}

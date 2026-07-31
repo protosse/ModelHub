@@ -108,7 +108,7 @@ ModelHub 库（持久）
 - **克隆**：复制 URL/协议/模型，换名称与 key；失败时弹窗内错误、保持打开
 - **无「启用同步」开关**：Provider 是否同步到 OC/Pi 改由 Agent 工作台的同步目录决定（§3.4.3）  
 - **新建 / 克隆 Provider 默认加入 OC/Pi 两个同步目录**（`modelIds` 空 = 全部模型），恢复旧版「新增即默认同步」；不需要可在 Agent 工作台取消勾选。**全局快速添加除外**：只加入用户明确勾选的 OC/Pi 目录
-- **全局快速添加**：左侧主导航提供独立快捷按钮，在任意页面打开弹窗；填写 Base URL 后即可用当前协议与可选 Key 临时获取远程模型（不先落库），也可手动添加 Model ID；选择至少一个模型、其中一个默认模型及至少一个目标 Agent 后「保存并应用」。Provider、模型、所选 OC/Pi 目录一次写入 Store/Secrets；Claude/Codex 切为第三方 Active，OC/Pi 写目录并切默认模型；随后立即按勾选 Agent 逐项 Apply
+- **全局快速添加**：左侧主导航提供独立快捷按钮，在任意页面打开弹窗；填写 Base URL 后即可用当前协议与可选 Key 临时获取远程模型（不先落库），也可手动添加 Model ID；选择至少一个模型、其中一个默认模型及至少一个目标 Agent（目标 Agent 勾选默认记忆上次选择）后「保存并应用」。Provider、模型、所选 OC/Pi 目录一次写入 Store/Secrets；Claude/Codex 切为第三方 Active，OC/Pi 写目录并切默认模型；随后立即按勾选 Agent 逐项 Apply
 - **快速添加失败语义**：Store/Secrets 保存失败则不 Apply；保存成功后 Agent Apply 仍按现有隔离规则逐项执行，部分失败不回滚已保存库项或成功写出的 Agent，结果页逐项展示并可到 Agent 工作台重试；完成后刷新全局路径状态与会话 `draftBindings`
 - Toast：右下角浮层；连续 Toast **重置计时**（不互相提前关掉）；**测试完成/停止不弹成功 Toast**；失败与阻断必须提示  
 - **主导航 Tab 保活**（visit-then-keep-alive）：切走再回来保留页面本地状态；Providers 页隐藏时 **暂停** test-session 订阅，回到页时再订阅并刷新展示  
@@ -618,3 +618,4 @@ src-tauri/src/
 | 2026-07-29 | 左侧主导航支持收起为仅图标栏（约 56px），展开为图标+文案；收起偏好 localStorage 持久化。 |
 | 2026-07-30 | 代码审查修复（详见对应章节）：①`read_live_bindings` 按 Agent 独立读取，单文件损坏不再清空全部草稿；②写出 key 避让磁盘上未受管原生 key，不再接管同名原生块、取消同步不再删原生块；③回匹配按协议两段式（精确协议优先、`/v1` 归一兑底、纯 base 兜底），排序不影响结果；④导入去重键 `provider_endpoint_key` 对 openai 系协议去掉末尾 `/v1`，与写出 `/v1` 地址视为同一端点，修复重复导入；⑤OpenCode `.jsonc` 解析容忍完整 JSONC（行内/块注释、尾逗号）；⑥默认模型下拉与 Apply 均限定在该 Provider 的同步模型子集内；⑦删除模型时 scrub 两个 catalog 的 `modelIds`，显式子集清空则整条移出目录（不退化为“全部”）；⑧单模型测试停止后面板回显上一次已完成结果，不把取消的跑记为失败；⑨Apply 完成后刷新全局 `paths.*Exists`，立即显示已找到。 |
 | 2026-07-31 | 新增全局「快速添加」：填写 Base URL 后可用未落库连接信息获取模型，亦可手动添加；选择模型、共同默认模型与目标 Agent 后，一次保存 Provider/模型/所选 OC·Pi 目录并立即逐 Agent Apply；仅勾选的 OC/Pi 加入目录，部分 Apply 失败不回滚已保存库项并逐项展示结果。 |
+| 2026-07-31 | 「快速添加」目标 Agent 勾选默认记忆上次选择（localStorage 持久化），再次打开弹窗时预勾上次勾选项；非法值会被过滤。 |
