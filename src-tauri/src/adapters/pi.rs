@@ -2,11 +2,12 @@ use anyhow::Result;
 use serde_json::{json, Map, Value};
 
 use super::backup_before_write;
-use crate::backup::new_stamp;
 use super::util::{
-    ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
-    unmanaged_provider_keys, write_json_value,
+    ensure_object, find_existing_provider_entry, read_json_value,
+    retain_unmanaged_provider_entries, serialize_json_value, unmanaged_provider_keys,
 };
+use crate::backup::new_stamp;
+use crate::file_io::write_atomic_group;
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys_with_reserved, find_provider,
@@ -23,12 +24,9 @@ pub fn apply(
 ) -> Result<ApplyAgentResult> {
     let models_file = Paths::pi_models(&config.paths)?;
     let settings_file = Paths::pi_settings(&config.paths)?;
-    let stamp = new_stamp();
-    backup_before_write(paths, "pi", &models_file, keep, &stamp)?;
-    if settings_file.exists() {
-        backup_before_write(paths, "pi", &settings_file, keep, &stamp)?;
-    }
 
+    // Read and validate every target before creating backups or replacing any
+    // file, so a malformed settings file cannot leave models.json updated.
     let mut root = read_json_value(&models_file)?;
     let obj = ensure_object(&mut root)?;
 
@@ -69,8 +67,6 @@ pub fn apply(
         );
     }
 
-    write_json_value(&models_file, &root)?;
-
     let mut settings = read_json_value(&settings_file)?;
     let settings_obj = ensure_object(&mut settings)?;
     if let (Some(pid), Some(mid)) = (
@@ -86,16 +82,27 @@ pub fn apply(
             .map(|(_, models)| models.iter().any(|m| m.id == mid))
             .unwrap_or(false);
         if in_subset {
-            if let (Some(p), Some(upstream)) =
-                (find_provider(store, pid), resolve_upstream_model_id(store, mid))
-            {
+            if let (Some(p), Some(upstream)) = (
+                find_provider(store, pid),
+                resolve_upstream_model_id(store, mid),
+            ) {
                 let slug = write_keys.get(&p.id).cloned().unwrap_or_default();
                 settings_obj.insert("defaultProvider".into(), Value::String(slug));
                 settings_obj.insert("defaultModel".into(), Value::String(upstream));
             }
         }
     }
-    write_json_value(&settings_file, &settings)?;
+    let models_bytes = serialize_json_value(&root)?;
+    let settings_bytes = serialize_json_value(&settings)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "pi", &models_file, keep, &stamp)?;
+    if settings_file.exists() {
+        backup_before_write(paths, "pi", &settings_file, keep, &stamp)?;
+    }
+    write_atomic_group(&[
+        (models_file.clone(), models_bytes),
+        (settings_file.clone(), settings_bytes),
+    ])?;
 
     Ok(ApplyAgentResult {
         agent: "pi".into(),

@@ -67,6 +67,54 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Replace a related set of files as one best-effort transaction. All payloads
+/// must be serialized before calling this function. If a replacement fails,
+/// files already replaced in this call are restored to their original bytes.
+pub fn write_atomic_group(files: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    let originals = files
+        .iter()
+        .map(|(path, _)| {
+            if path.is_file() {
+                fs::read(path)
+                    .map(Some)
+                    .with_context(|| format!("read {}", path.display()))
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for (index, (path, contents)) in files.iter().enumerate() {
+        if let Err(write_error) = write_atomic(path, contents) {
+            let mut rollback_errors = Vec::new();
+            for rollback_index in (0..index).rev() {
+                let rollback_path = &files[rollback_index].0;
+                let rollback = match &originals[rollback_index] {
+                    Some(bytes) => write_atomic(rollback_path, bytes),
+                    None => {
+                        if rollback_path.exists() {
+                            fs::remove_file(rollback_path).map_err(anyhow::Error::from)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                };
+                if let Err(error) = rollback {
+                    rollback_errors.push(format!("{}: {error}", rollback_path.display()));
+                }
+            }
+            if rollback_errors.is_empty() {
+                return Err(write_error).context("write file group; prior files restored");
+            }
+            anyhow::bail!(
+                "write file group failed: {write_error}; rollback failed: {}",
+                rollback_errors.join("; ")
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +130,25 @@ mod tests {
 
         assert_eq!(fs::read(&file).unwrap(), b"new");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomic_group_rolls_back_prior_replacements() {
+        let dir = std::env::temp_dir().join(format!("modelhub-group-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.json");
+        let invalid_target = dir.join("target-directory");
+        fs::write(&first, b"old").unwrap();
+        fs::create_dir(&invalid_target).unwrap();
+
+        let result = write_atomic_group(&[
+            (first.clone(), b"new".to_vec()),
+            (invalid_target, b"cannot replace a directory".to_vec()),
+        ]);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&first).unwrap(), b"old");
         fs::remove_dir_all(dir).unwrap();
     }
 }

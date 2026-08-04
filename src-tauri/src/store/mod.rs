@@ -399,42 +399,76 @@ impl StoreService {
     }
 
     pub fn clone_provider(&self, id: &str, new_name: &str, new_api_key: &str) -> Result<Provider> {
-        let store = self.load_store()?;
+        let mut store = self.load_store()?;
+        let mut secrets = self.load_secrets()?;
         let source = store
             .providers
             .iter()
             .find(|p| p.id == id)
             .context("provider not found")?
             .clone();
-        let models: Vec<Model> = store
+        let source_models: Vec<Model> = store
             .models
             .iter()
             .filter(|m| m.provider_id == id)
             .cloned()
             .collect();
+        let name = new_name.trim().to_string();
+        if name.is_empty() {
+            anyhow::bail!("提供商名称不能为空");
+        }
+        if store
+            .providers
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            anyhow::bail!("提供商名称已存在：{name}");
+        }
 
-        let created = self.add_provider(ProviderInput {
-            name: new_name.to_string(),
+        let now = now_iso();
+        let secret_ref = format!("sec_{}", Uuid::new_v4());
+        let created = Provider {
+            id: format!("prov_{}", Uuid::new_v4()),
+            name,
             base_url: source.base_url,
             protocol: source.protocol,
-            api_key: new_api_key.to_string(),
             enabled: source.enabled,
             notes: source.notes,
-        })?;
-
-        let mut store = self.load_store()?;
-        let now = now_iso();
-        for m in models {
+            secret_ref: secret_ref.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        secrets.secrets.insert(
+            secret_ref,
+            SecretEntry {
+                api_key: new_api_key.to_string(),
+                updated_at: now.clone(),
+            },
+        );
+        store.providers.push(created.clone());
+        for model in source_models {
             store.models.push(Model {
                 id: format!("mdl_{}", Uuid::new_v4()),
                 provider_id: created.id.clone(),
-                model_id: m.model_id,
-                display_name: m.display_name,
+                model_id: model.model_id,
+                display_name: model.display_name,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             });
         }
-        self.save_store(&store)?;
+        if let Some(entries) = store.agent_catalogs.opencode.as_mut() {
+            entries.push(CatalogEntry {
+                provider_id: created.id.clone(),
+                model_ids: Vec::new(),
+            });
+        }
+        if let Some(entries) = store.agent_catalogs.pi.as_mut() {
+            entries.push(CatalogEntry {
+                provider_id: created.id.clone(),
+                model_ids: Vec::new(),
+            });
+        }
+        self.save_store_and_secrets(&store, &secrets)?;
         Ok(created)
     }
 
@@ -870,19 +904,17 @@ fn clear_catalogs_for_provider(c: &mut AgentCatalogs, provider_id: &str) {
 /// whole entry is removed so the provider does not silently switch to
 /// "all models" (`[]`), matching the UI rule that zero selected models = remove.
 fn clear_model_from_catalogs(c: &mut AgentCatalogs, model_id: &str) {
-    for list in [c.opencode.as_mut(), c.pi.as_mut()] {
-        if let Some(entries) = list {
-            let mut i = 0;
-            while i < entries.len() {
-                if entries[i].model_ids.iter().any(|id| id == model_id) {
-                    entries[i].model_ids.retain(|id| id != model_id);
-                    if entries[i].model_ids.is_empty() {
-                        entries.remove(i);
-                        continue;
-                    }
+    for entries in [c.opencode.as_mut(), c.pi.as_mut()].into_iter().flatten() {
+        let mut i = 0;
+        while i < entries.len() {
+            if entries[i].model_ids.iter().any(|id| id == model_id) {
+                entries[i].model_ids.retain(|id| id != model_id);
+                if entries[i].model_ids.is_empty() {
+                    entries.remove(i);
+                    continue;
                 }
-                i += 1;
             }
+            i += 1;
         }
     }
 }
@@ -1010,10 +1042,8 @@ pub fn provider_slug(provider: &Provider) -> String {
     for c in provider.name.chars() {
         if c.is_ascii_alphanumeric() {
             s.push(c.to_ascii_lowercase());
-        } else if c == '-' || c == '_' || c.is_whitespace() {
-            if !s.ends_with('-') {
-                s.push('-');
-            }
+        } else if (c == '-' || c == '_' || c.is_whitespace()) && !s.ends_with('-') {
+            s.push('-');
         }
     }
     let s = s.trim_matches('-').to_string();
@@ -1114,10 +1144,44 @@ mod tests {
     }
 
     #[test]
+    fn clone_provider_commits_provider_secret_models_and_catalogs_together() {
+        let svc = service("clone-provider");
+        let source = svc.add_provider(provider("source")).unwrap();
+        svc.add_model(ModelInput {
+            provider_id: source.id.clone(),
+            model_id: "model-a".into(),
+            display_name: "Model A".into(),
+        })
+        .unwrap();
+
+        let cloned = svc
+            .clone_provider(&source.id, "cloned", "cloned-key")
+            .unwrap();
+        let store = svc.load_store().unwrap();
+        let secrets = svc.load_secrets().unwrap();
+
+        assert_eq!(store.providers.len(), 2);
+        assert!(store
+            .models
+            .iter()
+            .any(|model| model.provider_id == cloned.id && model.model_id == "model-a"));
+        assert_eq!(secrets.secrets[&cloned.secret_ref].api_key, "cloned-key");
+        for catalog in [
+            store.agent_catalogs.opencode.as_ref().unwrap(),
+            store.agent_catalogs.pi.as_ref().unwrap(),
+        ] {
+            assert!(catalog.iter().any(|entry| entry.provider_id == cloned.id));
+        }
+        fs::remove_dir_all(&svc.paths.root).unwrap();
+    }
+
+    #[test]
     fn invalid_backup_keep_count_is_rejected_on_save_and_load() {
         let svc = service("invalid-config");
-        let mut config = AppConfig::default();
-        config.backup_keep_count = 0;
+        let config = AppConfig {
+            backup_keep_count: 0,
+            ..AppConfig::default()
+        };
         assert!(svc.save_config(&config).is_err());
 
         svc.ensure_dirs().unwrap();
@@ -1202,41 +1266,58 @@ mod tests {
         // Anthropic keeps the full URL (no /v1 convention); key uses `|` separator.
         let anthropic = Protocol::AnthropicMessages;
         let anthropic_key = provider_endpoint_key(base, &anthropic);
-        assert_eq!(
-            anthropic_key,
-            "https://api.example.com|anthropic-messages",
-        );
+        assert_eq!(anthropic_key, "https://api.example.com|anthropic-messages",);
     }
 
     #[test]
     fn delete_model_clears_model_ids_from_catalogs() {
         let svc = service("delete-model-catalog");
         let p = svc.add_provider(provider("x")).unwrap();
-        let m1 = svc.add_model(ModelInput {
-            provider_id: p.id.clone(),
-            model_id: "gpt-4".into(),
-            display_name: "GPT-4".into(),
-        }).unwrap();
-        let m2 = svc.add_model(ModelInput {
-            provider_id: p.id.clone(),
-            model_id: "gpt-3.5".into(),
-            display_name: "GPT-3.5".into(),
-        }).unwrap();
+        let m1 = svc
+            .add_model(ModelInput {
+                provider_id: p.id.clone(),
+                model_id: "gpt-4".into(),
+                display_name: "GPT-4".into(),
+            })
+            .unwrap();
+        let m2 = svc
+            .add_model(ModelInput {
+                provider_id: p.id.clone(),
+                model_id: "gpt-3.5".into(),
+                display_name: "GPT-3.5".into(),
+            })
+            .unwrap();
 
         // OC: explicit subset [m1, m2]; PI: empty = all models.
-        svc.set_agent_catalog("opencode", &[
-            CatalogEntry { provider_id: p.id.clone(), model_ids: vec![m1.id.clone(), m2.id.clone()] },
-        ]).unwrap();
-        svc.set_agent_catalog("pi", &[
-            CatalogEntry { provider_id: p.id.clone(), model_ids: vec![] },
-        ]).unwrap();
+        svc.set_agent_catalog(
+            "opencode",
+            &[CatalogEntry {
+                provider_id: p.id.clone(),
+                model_ids: vec![m1.id.clone(), m2.id.clone()],
+            }],
+        )
+        .unwrap();
+        svc.set_agent_catalog(
+            "pi",
+            &[CatalogEntry {
+                provider_id: p.id.clone(),
+                model_ids: vec![],
+            }],
+        )
+        .unwrap();
 
         // Delete m1 — OC subset shrinks to [m2]; PI empty stays empty.
         svc.delete_model(&m1.id).unwrap();
         let store = svc.load_store().unwrap();
-        let oc_entry = store.agent_catalogs.opencode.as_ref()
+        let oc_entry = store
+            .agent_catalogs
+            .opencode
+            .as_ref()
             .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
-        let pi_entry = store.agent_catalogs.pi.as_ref()
+        let pi_entry = store
+            .agent_catalogs
+            .pi
+            .as_ref()
             .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
         assert_eq!(
             oc_entry.map(|e| e.model_ids.clone()),
@@ -1248,12 +1329,24 @@ mod tests {
         // PI empty entry stays.
         svc.delete_model(&m2.id).unwrap();
         let store = svc.load_store().unwrap();
-        let oc_remaining = store.agent_catalogs.opencode.as_ref()
+        let oc_remaining = store
+            .agent_catalogs
+            .opencode
+            .as_ref()
             .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
-        let pi_remaining = store.agent_catalogs.pi.as_ref()
+        let pi_remaining = store
+            .agent_catalogs
+            .pi
+            .as_ref()
             .and_then(|v| v.iter().find(|e| e.provider_id == p.id));
-        assert!(oc_remaining.is_none(), "empty subset entry should be removed from OC catalog");
-        assert!(pi_remaining.is_some(), "PI entry with empty subset (all models) stays");
+        assert!(
+            oc_remaining.is_none(),
+            "empty subset entry should be removed from OC catalog"
+        );
+        assert!(
+            pi_remaining.is_some(),
+            "PI entry with empty subset (all models) stays"
+        );
 
         fs::remove_dir_all(&svc.paths.root).unwrap();
     }

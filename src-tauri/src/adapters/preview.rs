@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::util::{
-    find_existing_provider_entry, is_modelhub_managed_provider, read_json_value, unmanaged_provider_keys,
+    find_existing_provider_entry, is_modelhub_managed_provider, read_json_value,
+    unmanaged_provider_keys,
 };
 use crate::paths::ModelHubPaths as Paths;
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys_with_reserved, find_provider,
-    resolve_upstream_model_id, AgentMode, AppConfig, Secrets, Store, StoreService,
+    resolve_upstream_model_id, AgentMode, AppConfig, Protocol, Secrets, Store, StoreService,
 };
 use fs_err as fs;
 
@@ -229,11 +230,27 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
                 .and_then(|p| secrets.secrets.get(&p.secret_ref))
                 .map(|s| s.api_key.as_str())
                 .unwrap_or("");
+            let cur_wire = current
+                .get("model_providers")
+                .and_then(|providers| providers.get(key))
+                .and_then(|block| block.get("wire_api"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let unsupported_protocol = provider
+                .map(|provider| provider.protocol == Protocol::AnthropicMessages)
+                .unwrap_or(false);
+            let new_wire = provider
+                .and_then(|provider| match provider.protocol {
+                    Protocol::OpenaiCompletions => Some("chat"),
+                    Protocol::OpenaiResponses => Some("responses"),
+                    Protocol::AnthropicMessages => None,
+                })
+                .unwrap_or("");
             let cur_token = current
                 .get("model_providers")
-                .and_then(|p| p.get(key))
-                .and_then(|b| b.get("experimental_bearer_token"))
-                .and_then(|t| t.as_str())
+                .and_then(|providers| providers.get(key))
+                .and_then(|block| block.get("experimental_bearer_token"))
+                .and_then(|token| token.as_str())
                 .unwrap_or_default()
                 .to_string();
 
@@ -244,6 +261,18 @@ fn preview_codex(config: &AppConfig, store: &Store, secrets: &Secrets) -> Result
                 &cur_base,
                 &new_base,
             ));
+            if unsupported_protocol {
+                lines.push(DiffLine {
+                    kind: "remove".into(),
+                    text: "! Codex 不支持 anthropic-messages Provider".into(),
+                });
+            } else {
+                lines.push(chg(
+                    &format!("model_providers.{key}.wire_api"),
+                    cur_wire,
+                    new_wire,
+                ));
+            }
             lines.push(DiffLine {
                 kind: "same".into(),
                 text: format!("provider name: {new_name}"),

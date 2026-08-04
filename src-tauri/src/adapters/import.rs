@@ -328,7 +328,7 @@ fn merge_candidates(raw: Vec<Candidate>) -> Vec<Candidate> {
         }
     }
     let mut out: Vec<_> = map.into_values().collect();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|item| item.name.to_lowercase());
     out
 }
 

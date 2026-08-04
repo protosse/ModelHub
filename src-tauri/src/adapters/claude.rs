@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::backup_before_write;
-use crate::backup::new_stamp;
 use super::util::{ensure_object, read_json_value, remove_path, set_string_path, write_json_value};
+use crate::backup::new_stamp;
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     find_provider, resolve_upstream_model_id, AgentMode, AppConfig, ApplyAgentResult, Secrets,

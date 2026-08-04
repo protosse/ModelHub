@@ -65,6 +65,7 @@ export function AgentWorkbenchPage({
   const [bindings, setBindings] = useState<AgentBindings>(draft ?? emptyBindings());
   const [loading, setLoading] = useState(!draft);
   const bootstrapped = useRef(draft !== null);
+  const previewRequestId = useRef(0);
 
   const [preview, setPreview] = useState<ApplyPreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -120,15 +121,22 @@ export function AgentWorkbenchPage({
 
   // Preview all four agents in one call; drives both status dots and detail diff.
   const loadPreview = useCallback(async (b: AgentBindings) => {
+    const requestId = ++previewRequestId.current;
     setPreviewBusy(true);
     try {
       const p = await api.previewApply([], b);
-      setPreview(p);
+      if (previewRequestId.current === requestId) {
+        setPreview(p);
+      }
     } catch (e) {
-      setPreview(null);
-      onToastRef.current(e instanceof Error ? e.message : String(e));
+      if (previewRequestId.current === requestId) {
+        setPreview(null);
+        onToastRef.current(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setPreviewBusy(false);
+      if (previewRequestId.current === requestId) {
+        setPreviewBusy(false);
+      }
     }
   }, []);
 
@@ -764,11 +772,11 @@ function AgentDiffView({
 }
 
 function protocolWarn(providers: readonly Provider[], providerId: string) {
-  const p = providers.find((x) => x.id === providerId);
-  if (!p || p.protocol === "openai-responses") return null;
+  const provider = providers.find((item) => item.id === providerId);
+  if (!provider || provider.protocol !== "anthropic-messages") return null;
   return (
-    <div className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-      当前协议为 {p.protocol}，Codex 通常需要 openai-responses，可能不可用。
+    <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+      Codex 不支持 anthropic-messages，请选择 OpenAI 协议 Provider。
     </div>
   );
 }

@@ -13,7 +13,7 @@ pub use fetch_models::{fetch_remote_models, fetch_remote_models_from_input};
 pub use import::{import_from_agents, preview_import};
 pub use live::read_live_bindings;
 pub use preview::{preview_apply, ApplyPreview};
-pub use test_connection::test_model_connection;
+pub use test_connection::{test_model_connection, TestConnectionParams};
 
 use anyhow::Result;
 

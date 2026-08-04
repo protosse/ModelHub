@@ -2,11 +2,12 @@ use anyhow::Result;
 use serde_json::{json, Map, Value};
 
 use super::backup_before_write;
-use crate::backup::new_stamp;
 use super::util::{
-    ensure_object, find_existing_provider_entry, read_json_value, retain_unmanaged_provider_entries,
-    unmanaged_provider_keys, write_json_value,
+    ensure_object, find_existing_provider_entry, read_json_value,
+    retain_unmanaged_provider_entries, serialize_json_value, unmanaged_provider_keys,
 };
+use crate::backup::new_stamp;
+use crate::file_io::write_atomic_group;
 use crate::paths::{ModelHubPaths, ModelHubPaths as Paths};
 use crate::store::{
     agent_write_base_url, assign_catalog_write_keys_with_reserved, resolve_upstream_model_id,
@@ -23,12 +24,9 @@ pub fn apply(
 ) -> Result<ApplyAgentResult> {
     let file = Paths::opencode_config(&config.paths)?;
     let auth_file = Paths::opencode_auth(&config.paths)?;
-    let stamp = new_stamp();
-    backup_before_write(paths, "opencode", &file, keep, &stamp)?;
-    if auth_file.exists() {
-        backup_before_write(paths, "opencode", &auth_file, keep, &stamp)?;
-    }
 
+    // Parse every target before backups and replacements. The two generated
+    // payloads are then committed as a group with rollback on write failure.
     let mut root = read_json_value(&file)?;
     let obj = ensure_object(&mut root)?;
 
@@ -124,8 +122,17 @@ pub fn apply(
         }
     }
 
-    write_json_value(&file, &root)?;
-    write_json_value(&auth_file, &auth)?;
+    let config_bytes = serialize_json_value(&root)?;
+    let auth_bytes = serialize_json_value(&auth)?;
+    let stamp = new_stamp();
+    backup_before_write(paths, "opencode", &file, keep, &stamp)?;
+    if auth_file.exists() {
+        backup_before_write(paths, "opencode", &auth_file, keep, &stamp)?;
+    }
+    write_atomic_group(&[
+        (file.clone(), config_bytes),
+        (auth_file.clone(), auth_bytes),
+    ])?;
 
     Ok(ApplyAgentResult {
         agent: "opencode".into(),

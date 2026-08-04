@@ -5,6 +5,11 @@ use std::path::Path;
 
 use crate::file_io::write_atomic;
 
+pub fn serialize_json_value(value: &Value) -> Result<Vec<u8>> {
+    let text = serde_json::to_string_pretty(value)?;
+    Ok(format!("{text}\n").into_bytes())
+}
+
 pub fn read_json_value(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -26,8 +31,7 @@ pub fn write_json_value(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string_pretty(value)?;
-    write_atomic(path, format!("{text}\n").as_bytes())
+    write_atomic(path, &serialize_json_value(value)?)
 }
 
 /// Strip `//` line comments (full-line or trailing) and `/* */` block
@@ -129,7 +133,7 @@ pub fn strip_trailing_commas(input: &str) -> String {
     out
 }
 
-pub fn ensure_object<'a>(value: &'a mut Value) -> Result<&'a mut serde_json::Map<String, Value>> {
+pub fn ensure_object(value: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
     if !value.is_object() {
         *value = Value::Object(serde_json::Map::new());
     }
@@ -177,7 +181,9 @@ pub fn retain_unmanaged_provider_entries(providers: &mut Map<String, Value>) {
 /// Keys of provider blocks on disk that are NOT managed by ModelHub. Generated
 /// write keys avoid these so a ModelHub provider never overwrites or takes over
 /// a native/user block that merely happens to share the slug.
-pub fn unmanaged_provider_keys(providers: &Map<String, Value>) -> std::collections::HashSet<String> {
+pub fn unmanaged_provider_keys(
+    providers: &Map<String, Value>,
+) -> std::collections::HashSet<String> {
     providers
         .iter()
         .filter(|(_, value)| !is_modelhub_managed_provider(value))

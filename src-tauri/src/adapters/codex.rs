@@ -83,13 +83,7 @@ pub fn apply(
         store.agent_bindings.codex.provider_key.clone()
     };
 
-    let mut warn = String::new();
-    if provider.protocol != Protocol::OpenaiResponses {
-        warn = format!(
-            "警告：Provider 协议为 {}，Codex 通常需要 openai-responses。",
-            provider.protocol.as_str()
-        );
-    }
+    let wire_api = codex_wire_api(&provider.protocol)?;
 
     table.insert("model".into(), Value::String(model_id.clone()));
     table.insert("model_provider".into(), Value::String(provider_key.clone()));
@@ -101,19 +95,16 @@ pub fn apply(
         .context("model_providers must be table")?;
 
     let existing = providers.get(&provider_key).and_then(Value::as_table);
-    let block = merge_provider_block(existing, provider, api_key);
+    let block = merge_provider_block(existing, provider, api_key, wire_api);
     providers.insert(provider_key.clone(), Value::Table(block));
 
     write_toml_atomic(&file, &root)?;
     let _ = paths;
 
     let mut message = format!(
-        "已写入 Codex Active：{} / {}（key 在 config.toml experimental_bearer_token，未改 auth.json）",
+        "已写入 Codex Active：{} / {}（wire_api={wire_api}，key 在 config.toml experimental_bearer_token，未改 auth.json）",
         provider.name, model_id
     );
-    if !warn.is_empty() {
-        message = format!("{warn} {message}");
-    }
     message.push_str(" 请重启 Codex 后生效。");
 
     Ok(ApplyAgentResult {
@@ -125,10 +116,21 @@ pub fn apply(
     })
 }
 
+fn codex_wire_api(protocol: &Protocol) -> Result<&'static str> {
+    match protocol {
+        Protocol::OpenaiCompletions => Ok("chat"),
+        Protocol::OpenaiResponses => Ok("responses"),
+        Protocol::AnthropicMessages => {
+            anyhow::bail!("Codex 不支持 anthropic-messages Provider，请选择 OpenAI 协议")
+        }
+    }
+}
+
 fn merge_provider_block(
     existing: Option<&Table>,
     provider: &crate::store::Provider,
     api_key: String,
+    wire_api: &str,
 ) -> Table {
     let mut block = existing.cloned().unwrap_or_default();
     block.insert("name".into(), Value::String(provider.name.clone()));
@@ -136,7 +138,7 @@ fn merge_provider_block(
         "base_url".into(),
         Value::String(agent_write_base_url(&provider.base_url, &provider.protocol)),
     );
-    block.insert("wire_api".into(), Value::String("responses".into()));
+    block.insert("wire_api".into(), Value::String(wire_api.into()));
     // Provider-scoped key; leave auth.json alone (scheme B / cc-switch preserve path).
     block.insert("experimental_bearer_token".into(), Value::String(api_key));
     block
@@ -176,7 +178,7 @@ mod tests {
             "X-Native" = "keep"
         };
 
-        let merged = merge_provider_block(Some(&existing), &provider, "secret".into());
+        let merged = merge_provider_block(Some(&existing), &provider, "secret".into(), "responses");
 
         assert_eq!(
             merged.get("custom_flag").and_then(Value::as_bool),
@@ -200,5 +202,31 @@ mod tests {
                 .and_then(Value::as_str),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn completions_provider_uses_chat_wire_api() {
+        let provider = Provider {
+            id: "prov_1".into(),
+            name: "Chat Gateway".into(),
+            base_url: "https://chat.example.com".into(),
+            protocol: Protocol::OpenaiCompletions,
+            enabled: true,
+            notes: String::new(),
+            secret_ref: "sec_1".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+
+        assert_eq!(codex_wire_api(&provider.protocol).unwrap(), "chat");
+        let merged = merge_provider_block(
+            None,
+            &provider,
+            "secret".into(),
+            codex_wire_api(&provider.protocol).unwrap(),
+        );
+
+        assert_eq!(merged.get("wire_api").and_then(Value::as_str), Some("chat"));
+        assert!(codex_wire_api(&Protocol::AnthropicMessages).is_err());
     }
 }

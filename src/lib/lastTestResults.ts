@@ -4,6 +4,7 @@
 
 import * as api from "../api/tauri";
 import type { ModelTestResult, TestConnectionResult } from "../types";
+import { shouldKeepInMemoryOutcome } from "./testResultPolicy";
 
 export type LastTestOutcome = {
   readonly ok: boolean;
@@ -41,38 +42,51 @@ export function getLastTestResult(modelId: string): LastTestOutcome | null {
   return results.get(modelId) ?? null;
 }
 
+/** Restore the exact finished outcome captured before a cancelled run. */
+export function restoreLastTestResult(
+  modelId: string,
+  outcome: LastTestOutcome | null,
+): void {
+  if (outcome) {
+    results.set(modelId, outcome);
+  } else {
+    results.delete(modelId);
+  }
+  notify();
+}
+
 /** Seed / refresh cache from get_state (store.modelTestResults). Keeps in-memory logs if present. */
 export function hydrateLastTestResults(
   map: Readonly<Record<string, ModelTestResult>> | null | undefined,
 ): void {
-  const prevLogs = new Map<string, { logs: readonly string[]; result: TestConnectionResult | null }>();
-  for (const [id, r] of results) {
-    prevLogs.set(id, { logs: r.logs, result: r.result });
-  }
+  const previous = new Map(results);
   results.clear();
   if (map) {
     for (const [id, r] of Object.entries(map)) {
       if (!r || typeof r.ok !== "boolean") continue;
-      const keep = prevLogs.get(id);
+      const inMemory = previous.get(id);
+      const diskTestedAt = r.testedAt || new Date().toISOString();
+      const keepMemoryOutcome = shouldKeepInMemoryOutcome(
+        inMemory?.testedAt,
+        diskTestedAt,
+      );
+      const memorySummary = keepMemoryOutcome ? inMemory : undefined;
       results.set(id, {
-        ok: r.ok,
-        testedAt: r.testedAt || new Date().toISOString(),
-        latencyMs: r.latencyMs ?? undefined,
-        logs: keep?.logs ?? [],
-        result: keep?.result ?? null,
+        ok: memorySummary?.ok ?? r.ok,
+        testedAt: memorySummary?.testedAt ?? diskTestedAt,
+        latencyMs: memorySummary
+          ? memorySummary.latencyMs
+          : (r.latencyMs ?? undefined),
+        logs: inMemory?.logs ?? [],
+        result: inMemory?.result ?? null,
       });
     }
   }
-  // Preserve pure in-memory entries not yet on disk
-  for (const [id, keep] of prevLogs) {
-    if (!results.has(id) && (keep.logs.length || keep.result)) {
-      results.set(id, {
-        ok: keep.result?.ok ?? false,
-        testedAt: new Date().toISOString(),
-        latencyMs: keep.result?.latencyMs,
-        logs: keep.logs,
-        result: keep.result,
-      });
+  // Preserve in-memory entries not yet on disk, including a just-finished
+  // outcome whose fire-and-forget persistence command is still queued.
+  for (const [id, inMemory] of previous) {
+    if (!results.has(id) && (inMemory.logs.length || inMemory.result)) {
+      results.set(id, inMemory);
     }
   }
   notify();

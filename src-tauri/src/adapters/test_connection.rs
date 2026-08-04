@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -65,16 +68,30 @@ impl LogSink {
     }
 }
 
+pub struct TestConnectionParams<'a> {
+    pub app: Option<AppHandle>,
+    pub run_id: &'a str,
+    pub store: &'a Store,
+    pub secrets: &'a Secrets,
+    pub model_row_id: &'a str,
+    pub prompt: &'a str,
+    pub timeout_secs: Option<u64>,
+    pub extra_headers: Option<&'a std::collections::HashMap<String, String>>,
+}
+
 pub async fn test_model_connection(
-    app: Option<AppHandle>,
-    run_id: &str,
-    store: &Store,
-    secrets: &Secrets,
-    model_row_id: &str,
-    prompt: &str,
-    timeout_secs: Option<u64>,
-    extra_headers: Option<&std::collections::HashMap<String, String>>,
+    params: TestConnectionParams<'_>,
 ) -> Result<TestConnectionResult> {
+    let TestConnectionParams {
+        app,
+        run_id,
+        store,
+        secrets,
+        model_row_id,
+        prompt,
+        timeout_secs,
+        extra_headers,
+    } = params;
     let mut log = LogSink::new(app, run_id.to_string());
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -114,22 +131,10 @@ pub async fn test_model_connection(
     let (url, body) = build_request(&base, &provider.protocol, &model.model_id, prompt)?;
     let request_body = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
 
-    // Merge order (later wins on same key):
-    //   1) protocol client defaults (Claude Code / openai-node / Codex)
-    //   2) per-run extra_headers from the UI
-    // This lets multi-provider runs mix protocols without one shared UA clobbering the other.
-    let mut merged_headers = protocol_default_headers(&provider.protocol);
-    if let Some(extra) = extra_headers {
-        for (k, v) in extra {
-            let key = k.trim();
-            if key.is_empty() {
-                continue;
-            }
-            merged_headers.insert(key.to_string(), v.clone());
-        }
-    }
-    let request_headers =
-        build_request_header_log(&provider.protocol, api_key, &merged_headers);
+    // Build one case-insensitive HeaderMap. User values are inserted last, so
+    // same-name headers replace protocol/auth defaults instead of being appended.
+    let request_header_map = build_request_headers(&provider.protocol, api_key, extra_headers)?;
+    let request_headers = build_header_log(&request_header_map);
 
     log.push(format!(
         "timeout={}s token_limit={}",
@@ -142,8 +147,8 @@ pub async fn test_model_connection(
         }
     ));
     log.push(format!(
-        "header merge: protocol defaults → run extra ({} header(s))",
-        merged_headers.len()
+        "header merge: auth/protocol defaults → run extra ({} header(s))",
+        request_header_map.len()
     ));
     log.push(format!("POST {url}"));
     for h in &request_headers {
@@ -159,11 +164,7 @@ pub async fn test_model_connection(
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
 
-    let mut req = client.post(&url).json(&body);
-    req = apply_auth(req, &provider.protocol, api_key);
-    for (k, v) in &merged_headers {
-        req = req.header(k, v);
-    }
+    let req = client.post(&url).json(&body).headers(request_header_map);
 
     let started = Instant::now();
     log.push("sending request…");
@@ -199,16 +200,11 @@ pub async fn test_model_connection(
     let latency_ms = started.elapsed().as_millis() as u64;
     let status = resp.status();
     let status_code = status.as_u16();
-    let response_headers = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            let val = v.to_str().unwrap_or("<binary>");
-            format!("{k}: {val}")
-        })
-        .collect::<Vec<_>>();
+    let response_headers = build_header_log(resp.headers());
 
-    log.push(format!("response status={status_code} latency={latency_ms}ms"));
+    log.push(format!(
+        "response status={status_code} latency={latency_ms}ms"
+    ));
     for h in &response_headers {
         log.push(format!("resp header: {h}"));
     }
@@ -218,10 +214,7 @@ pub async fn test_model_connection(
     let raw_chars = raw.chars().count();
     log.push(format!("resp body length={raw_chars} chars"));
     let response_body = truncate(&raw, BODY_TRUNCATE);
-    log.push(format!(
-        "resp body:\n{}",
-        truncate(&raw, LOG_BODY_TRUNCATE)
-    ));
+    log.push(format!("resp body:\n{}", truncate(&raw, LOG_BODY_TRUNCATE)));
 
     if !status.is_success() {
         let err_snip: String = raw.chars().take(300).collect();
@@ -277,26 +270,29 @@ pub async fn test_model_connection(
 }
 
 /// Client identity defaults so gateways that check User-Agent accept the probe.
-/// Applied first; per-run extraHeaders can override.
-fn protocol_default_headers(protocol: &Protocol) -> std::collections::HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
+fn protocol_default_headers(protocol: &Protocol) -> HeaderMap {
+    let mut headers = HeaderMap::new();
     match protocol {
         Protocol::AnthropicMessages => {
-            m.insert("User-Agent".into(), "claude-cli/2.1.79".into());
-            m.insert("x-app".into(), "cli".into());
-            // Many Claude Code relays (e.g. anyrouter) require opt-in to the 1M
-            // context window; without this they return 400:
-            // "1m 上下文已经全量可用，请启用 1m 上下文后重试".
-            m.insert("anthropic-beta".into(), "context-1m-2025-08-07".into());
+            headers.insert("user-agent", HeaderValue::from_static("claude-cli/2.1.79"));
+            headers.insert("x-app", HeaderValue::from_static("cli"));
+            // Many Claude Code relays require this opt-in for the 1M context window.
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static("context-1m-2025-08-07"),
+            );
         }
         Protocol::OpenaiCompletions => {
-            m.insert("User-Agent".into(), "openai-node".into());
+            headers.insert("user-agent", HeaderValue::from_static("openai-node"));
         }
         Protocol::OpenaiResponses => {
-            m.insert("User-Agent".into(), "codex_cli_rs/0.144.4".into());
+            headers.insert(
+                "user-agent",
+                HeaderValue::from_static("codex_cli_rs/0.144.4"),
+            );
         }
     }
-    m
+    headers
 }
 
 fn build_request(
@@ -347,51 +343,67 @@ fn api_root(base: &str) -> String {
     }
 }
 
-fn apply_auth(
-    req: reqwest::RequestBuilder,
+fn build_request_headers(
     protocol: &Protocol,
     api_key: &str,
-) -> reqwest::RequestBuilder {
-    match protocol {
-        Protocol::AnthropicMessages => req
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json"),
-        _ => req
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json"),
+    extra: Option<&std::collections::HashMap<String, String>>,
+) -> Result<HeaderMap> {
+    let mut headers = protocol_default_headers(protocol);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .context("invalid Authorization header value")?,
+    );
+    if protocol == &Protocol::AnthropicMessages {
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(api_key).context("invalid x-api-key header value")?,
+        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     }
+
+    if let Some(extra) = extra {
+        for (raw_name, raw_value) in extra {
+            let name = raw_name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("invalid header name: {name}"))?;
+            let value = HeaderValue::from_str(raw_value)
+                .with_context(|| format!("invalid value for header {name}"))?;
+            headers.insert(name, value);
+        }
+    }
+    Ok(headers)
 }
 
-fn build_request_header_log(
-    protocol: &Protocol,
-    api_key: &str,
-    extra: &std::collections::HashMap<String, String>,
-) -> Vec<String> {
-    let mask = mask_key(api_key);
-    let mut headers = match protocol {
-        Protocol::AnthropicMessages => vec![
-            format!("x-api-key: {mask}"),
-            "anthropic-version: 2023-06-01".into(),
-            format!("Authorization: Bearer {mask}"),
-            "Content-Type: application/json".into(),
-        ],
-        _ => vec![
-            format!("Authorization: Bearer {mask}"),
-            "Content-Type: application/json".into(),
-        ],
-    };
-    for (k, v) in extra {
-        let lower = k.to_ascii_lowercase();
-        let val = if lower.contains("auth") || lower.contains("key") || lower.contains("token") {
-            mask_key(v)
-        } else {
-            v.clone()
-        };
-        headers.push(format!("{k}: {val}"));
-    }
+fn is_sensitive_header(name: &HeaderName) -> bool {
+    let lower = name.as_str();
+    name == AUTHORIZATION
+        || name == COOKIE
+        || name == SET_COOKIE
+        || lower == "proxy-authorization"
+        || lower.contains("key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("signature")
+}
+
+fn build_header_log(headers: &HeaderMap) -> Vec<String> {
     headers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.to_str().unwrap_or("<binary>");
+            let displayed = if is_sensitive_header(name) {
+                "***".to_string()
+            } else {
+                value.to_string()
+            };
+            format!("{name}: {displayed}")
+        })
+        .collect()
 }
 
 fn extract_assistant_text(protocol: &Protocol, raw: &str) -> Option<String> {
@@ -481,12 +493,46 @@ mod tests {
         let responses = protocol_default_headers(&Protocol::OpenaiResponses);
 
         assert_eq!(
-            completions.get("User-Agent").map(String::as_str),
+            completions
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
             Some("openai-node")
         );
         assert_eq!(
-            responses.get("User-Agent").map(String::as_str),
+            responses
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
             Some("codex_cli_rs/0.144.4")
         );
+    }
+
+    #[test]
+    fn extra_headers_replace_defaults_case_insensitively() {
+        let extra = std::collections::HashMap::from([
+            ("user-agent".to_string(), "custom-client".to_string()),
+            ("AUTHORIZATION".to_string(), "Bearer custom".to_string()),
+        ]);
+        let headers =
+            build_request_headers(&Protocol::OpenaiCompletions, "store-key", Some(&extra)).unwrap();
+
+        assert_eq!(headers.get_all("user-agent").iter().count(), 1);
+        assert_eq!(headers["user-agent"], "custom-client");
+        assert_eq!(headers.get_all(AUTHORIZATION).iter().count(), 1);
+        assert_eq!(headers[AUTHORIZATION], "Bearer custom");
+    }
+
+    #[test]
+    fn header_logs_redact_cookie_and_signature_values() {
+        let headers = HeaderMap::from_iter([
+            (SET_COOKIE, HeaderValue::from_static("session=raw-secret")),
+            (
+                HeaderName::from_static("x-signature"),
+                HeaderValue::from_static("signature-secret"),
+            ),
+        ]);
+        let log = build_header_log(&headers).join("\n");
+
+        assert!(!log.contains("raw-secret"));
+        assert!(!log.contains("signature-secret"));
     }
 }

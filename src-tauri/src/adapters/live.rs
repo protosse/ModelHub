@@ -218,7 +218,7 @@ fn live_opencode(config: &AppConfig, store: &Store) -> Result<OpencodeBinding> {
     let small = root
         .get("small_model")
         .and_then(|v| v.as_str())
-        .map(|s| {
+        .and_then(|s| {
             let (s_slug, s_up) = split_provider_model(s);
             if s_up.is_empty() {
                 None
@@ -232,8 +232,7 @@ fn live_opencode(config: &AppConfig, store: &Store) -> Result<OpencodeBinding> {
                 let (_, mid) = match_by_name_and_model(store, &s_slug, &s_up);
                 mid
             }
-        })
-        .flatten();
+        });
 
     Ok(OpencodeBinding {
         provider_id,
@@ -383,9 +382,10 @@ fn match_provider_model(
         })
         .or_else(|| {
             if loose_protocol {
-                store.providers.iter().find(|p| {
-                    provider_base_for_match(&p.base_url, &p.protocol) == comparable_base
-                })
+                store
+                    .providers
+                    .iter()
+                    .find(|p| provider_base_for_match(&p.base_url, &p.protocol) == comparable_base)
             } else {
                 None
             }

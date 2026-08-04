@@ -1,10 +1,13 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { TestConnectionResult } from "../types";
 import * as api from "../api/tauri";
+import { outcomeAfterCancelledRun } from "./testResultPolicy";
 import {
   clearLastTestLogs,
   getLastTestResult,
+  restoreLastTestResult,
   setLastTestResult,
+  type LastTestOutcome,
 } from "./lastTestResults";
 
 export type SingleTestSession = {
@@ -23,6 +26,8 @@ export type SingleTestSession = {
   /** When true, in-flight invoke result will be discarded when it returns. */
   cancelled: boolean;
   runId: string | null;
+  /** Finished cache entry captured immediately before the current run. */
+  previousOutcome: LastTestOutcome | null;
   liveLines: string[];
   result: TestConnectionResult | null;
   showLog: boolean;
@@ -124,6 +129,7 @@ export function ensureSingleTestSession(args: EnsureSingleArgs): SingleTestSessi
     busy: false,
     cancelled: false,
     runId: null,
+    previousOutcome: null,
     liveLines: last?.logs?.length ? [...last.logs] : [],
     result: last?.result ?? null,
     // Logs panel stays collapsed until the user expands it.
@@ -145,12 +151,12 @@ export function requestStopSingleTest(): void {
   // Invalidate run so the late invoke response is ignored.
   s.runId = null;
   s.busy = false;
-  // Restore the last finished result so the panel reflects the previous
-  // outcome instead of showing the stopped run as a failure.
-  const prev = getLastTestResult(s.modelId);
-  if (prev?.result) {
-    s.result = prev.result;
-  }
+  // Restore the exact pre-run cache entry. Live log events may have created a
+  // temporary false entry when this model had never completed a test.
+  const previousOutcome = outcomeAfterCancelledRun(s.previousOutcome);
+  restoreLastTestResult(s.modelId, previousOutcome);
+  s.result = previousOutcome?.result ?? null;
+  s.previousOutcome = null;
   notify();
 }
 
@@ -201,6 +207,7 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
   await ensureLogListener();
 
   const runId = newRunId();
+  s.previousOutcome = getLastTestResult(s.modelId);
   s.busy = true;
   s.cancelled = false;
   s.prompt = text;
@@ -232,6 +239,7 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
       logs: s.liveLines,
       result: res,
     });
+    s.previousOutcome = null;
     if (!res.ok) s.logTab = "response";
   } catch (e) {
     if (session !== s || s.runId !== runId || s.cancelled) return;
@@ -256,6 +264,7 @@ export async function runSingleTest(prompt: string, timeoutSecs: number): Promis
       logs: s.liveLines,
       result: s.result,
     });
+    s.previousOutcome = null;
     s.logTab = "timeline";
   } finally {
     // Only clear busy for this run if it was not already soft-stopped.

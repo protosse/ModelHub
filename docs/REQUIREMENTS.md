@@ -1,7 +1,7 @@
 # ModelHub — 产品需求与技术规格
 
 > 状态：**现行实现规格**（随开发迭代更新，非早期冻结草稿）  
-> 最后更新：2026-07-31（全局快速添加 Provider：临时取模型、选默认模型与目标 Agent、保存后立即 Apply）
+> 最后更新：2026-08-04（代码审查修复：并发持久化、Apply 事务、测试状态与 Codex 协议映射）
 > 项目代号：**ModelHub**  
 > 仓库：https://github.com/protosse/ModelHub  
 
@@ -105,7 +105,7 @@ ModelHub 库（持久）
 - **全选**：仅作用于**当前搜索结果（可见列表）**；勾选=并入可见 ID，取消=仅去掉可见 ID；筛选外已勾项保留（与导入页「清空当前」同语义）  
 - **空态**：库为空 →「暂无提供商…」；库非空但搜索无命中 →「无匹配结果」  
 - 删除提供商后：清勾选 / 远程模型缓存 / 详情选中；会话 `draftBindings` 中悬空 Provider/Model 引用在 `get_state` 刷新时 **scrub 掉**（避免 Apply 报「Provider 不存在」）  
-- **克隆**：复制 URL/协议/模型，换名称与 key；失败时弹窗内错误、保持打开
+- **克隆**：复制 URL/协议/模型，换名称与 key；Provider、Secret、模型与默认 OC/Pi 目录在一次联合提交中写入，失败不留下无模型的半成品；失败时弹窗内错误、保持打开
 - **无「启用同步」开关**：Provider 是否同步到 OC/Pi 改由 Agent 工作台的同步目录决定（§3.4.3）  
 - **新建 / 克隆 Provider 默认加入 OC/Pi 两个同步目录**（`modelIds` 空 = 全部模型），恢复旧版「新增即默认同步」；不需要可在 Agent 工作台取消勾选。**全局快速添加除外**：只加入用户明确勾选的 OC/Pi 目录
 - **全局快速添加**：左侧主导航提供独立快捷按钮，在任意页面打开弹窗；填写 Base URL 后即可用当前协议与可选 Key 临时获取远程模型（不先落库），也可手动添加 Model ID；选择至少一个模型、其中一个默认模型及至少一个目标 Agent（目标 Agent 勾选默认记忆上次选择）后「保存并应用」。Provider、模型、所选 OC/Pi 目录一次写入 Store/Secrets；Claude/Codex 切为第三方 Active，OC/Pi 写目录并切默认模型；随后立即按勾选 Agent 逐项 Apply
@@ -139,11 +139,11 @@ ModelHub 库（持久）
 | 关弹窗 | **不中断**；single / batch / multi 模块级 session 保活 |
 | 测试全部 | **串行**（测该 Provider 全部模型，无「仅已启用」过滤）；**停止**：待测立刻标跳过，当前请求跑完后结束会话；行内响应时间：优先本轮 `result.latencyMs`，否则回退 `modelTestResults.latencyMs`（重启后仍显示） |
 | 测试所选 | **全局并发 3**，**同提供商串行**；**停止**：待测立刻标跳过，进行中请求跑完后结束会话；响应时间回退规则同「测试全部」 |
-| 请求头 | 默认按协议自动注入客户端头（折叠行展示摘要）；弹窗可「自定义」写 `Key: Value` 覆盖/追加。合并：`协议默认 → 本轮覆盖`。协议默认：`anthropic-messages` → `User-Agent: claude-cli/2.1.79` + `x-app: cli` + `anthropic-beta: context-1m-2025-08-07`（兼容强制 1M 上下文的 Claude 中继）；`openai-completions` → `User-Agent: openai-node`；`openai-responses` → `User-Agent: codex_cli_rs/0.144.4`（兼容按 Codex 客户端标识放行的中继）。混测时各模型各自用协议默认，自定义为整轮全局覆盖。有覆盖时显示「清除覆盖」。仅本轮生效，不写回 Provider |
+| 请求头 | 默认按协议自动注入客户端头与鉴权头（折叠行展示脱敏摘要）；弹窗可「自定义」写 `Key: Value` 覆盖/追加。合并使用 HTTP 大小写不敏感语义：`鉴权/协议默认 → 本轮覆盖`，同名头只保留最终值，不发送重复头。协议默认：`anthropic-messages` → `User-Agent: claude-cli/2.1.79` + `x-app: cli` + `anthropic-beta: context-1m-2025-08-07`（兼容强制 1M 上下文的 Claude 中继）；`openai-completions` → `User-Agent: openai-node`；`openai-responses` → `User-Agent: codex_cli_rs/0.144.4`（兼容按 Codex 客户端标识放行的中继）。混测时各模型各自用协议默认，自定义为整轮全局覆盖。有覆盖时显示「清除覆盖」。仅本轮生效，不写回 Provider |
 | 提示词区 | 已保存选择 / 内容 / 另存为名称 / 保存 归为同一「提示词」分组；另存为名称紧挨内容下方 |
 | 跨入口共享 | `lastTestResults` + session；列表测过的结果可在详情看到 |
 | 提示词 | `store.testPrompts`；默认种子「连通性探测」内容：`将123@qq.com转为Base64，直接回复结果`；可设默认/删（默认不可删）；**单测与批量弹窗均支持保存/设默认/删除** |
-| 日志 | 脱敏；详细日志 **仅内存**；清空单测日志同步清共享缓存，避免批量结果回填 |
+| 日志 | 脱敏（请求与响应中的 Authorization、Cookie/Set-Cookie、Key/Token/Secret/Signature 类头均遮罩）；详细日志 **仅内存**；清空单测日志同步清共享缓存，避免批量结果回填 |
 | 最近测试列 | 成功/失败/测试中/待测/跳过 + **响应时间（ms）**（有则紧挨徽章显示）；摘要 `modelTestResults` 落盘含 `ok` / `testedAt` / `latencyMs`，重启后 hydrate 恢复状态与耗时；完整日志仅内存 |
 | 协议 | completions / responses / anthropic-messages；completions/anthropic 用小 `max_tokens`；**responses 不发送 `max_output_tokens`**（兼容拒绝该参数的第三方网关） |
 | 触发 | **仅用户点击发送/开始** 才请求 |
@@ -327,10 +327,10 @@ ModelHub 库（持久）
 
 #### 3.4.5 应用（Apply）
 
-- **状态点**：进入/草稿/库变化时一次 `preview_apply([], draft)` 拿全部四个 Agent 的 Diff；某 Agent Diff 含非 `same` 行 → 标「有更改」，否则「一致 / 无配置」  
+- **状态点**：进入/草稿/库变化时一次 `preview_apply([], draft)` 拿全部四个 Agent 的 Diff；某 Agent Diff 含非 `same` 行 → 标「有更改」，否则「一致 / 无配置」。快速连续变更时仅最新一次 Preview 响应可更新界面，旧响应不得覆盖新草稿
 - **右侧 Diff**：只显示当前选中 Agent（磁盘现状 → Apply 后）  
 - **应用此 Agent**：仅写出当前选中的 Agent；按钮位于右侧详情底部常驻操作栏，不随配置与 Diff 内容滚动
-- 流程：备份 → 写出 → 行内结果 / 重启提示。**Apply 完成后刷新全局路径状态**（`paths.*Exists`）：刚创建/修改的配置文件立即在工作台 Agent 列表显示为「已找到」，不必等下一次操作才刷新  
+- 流程：先读取、解析并序列化本 Agent 的全部目标文件 → 备份 → 成组原子替换 → 行内结果 / 重启提示。OpenCode / Pi 的多文件写出任一替换失败时回滚本次已替换文件；损坏配置在任何写入前失败。**Apply 完成后刷新全局路径状态**（`paths.*Exists`）：刚创建/修改的配置文件立即在工作台 Agent 列表显示为「已找到」，不必等下一次操作才刷新
 - Agent 原生配置读取或解析失败时，Preview 明确报错并清空旧预览，不把损坏文件当空配置。`read_live_bindings` **按 Agent 独立读取**：单个 Agent 文件损坏只令该 Agent 回退默认绑定，不影响其它 Agent 的草稿，避免“一个损坏文件清空全部绑定、Apply 仍可点”导致的误清空；损坏项的错误仍由该 Agent 的 Preview 报出，Apply 对损坏文件按该 Agent 失败处理而不写入。
 
 #### Diff 规则
@@ -342,7 +342,7 @@ ModelHub 库（持久）
   - **Pi**：对同步目录内每个 Provider，比磁盘块 `apiKey` 与 Store 密钥  
   - 仅 Key 变化时，四个 Agent 的更改对比与状态点均会标「有更改」  
 - **字段所有权**：ModelHub 只覆盖 UI 可配置字段及必要的 Agent 映射字段；Agent 原生未知字段不读入 Store、不在 Apply 中凭空重建或清空
-- **Codex 保留式写出**：只更新 `model` / `model_provider` 与所选 `model_providers.<key>` 的名称、base_url、wire_api、token；该块其它字段及其它 Provider 块全部保留；官方模式只切 `model_provider=openai`
+- **Codex 保留式写出**：只更新 `model` / `model_provider` 与所选 `model_providers.<key>` 的名称、base_url、wire_api、token；`openai-completions` 写 `wire_api="chat"`，`openai-responses` 写 `wire_api="responses"`，`anthropic-messages` 明确拒绝 Apply；该块其它字段及其它 Provider 块全部保留；官方模式只切 `model_provider=openai`
 - 写出 Provider key 由 **Provider 名称 slug** 生成（名称全局唯一），写出集内去重（撞名加 `-2`）；**且避开磁盘上未受 ModelHub 管理的原生 Provider key**（撞名同样加 `-2`），使 ModelHub Provider 永不覆盖/接管同名原生块，原生块在取消同步时原样保留。同一 baseUrl 不同协议的两个 Provider（如 `jianzhile` responses + `jianzhile-cc` anthropic）各得独立 key，不再串块/互相覆盖。Apply 与 Preview 用同一份 key 映射（含同一份 native key 避让集），Diff 与实际写出一致  
 - **OC/Pi 模型级 Diff**：对每个同步 Provider，比对磁盘该块已有模型 id 与本次将写出的集合，逐条列出 `+ 新增模型` / `- 不再同步模型`（相同的省略）  
 - **OC/Pi 匹配与保留**：写出 Provider 优先按 `_modelhub.providerId` 匹配磁盘原块（改名/slug 变化仍可继承），找不到时按本次目标 key 匹配。匹配项以磁盘原配置为基础重建：ModelHub 管理字段覆盖，Provider/模型的其它原生扩展字段保留。由于写出 key 已避开原生 key，目标 key 兜底不会接管用户/其它工具的原生块  
@@ -355,7 +355,7 @@ ModelHub 库（持久）
 | Agent | 要点 |
 |-------|------|
 | Claude | env + model；**不写** `_modelhub` |
-| Codex | 更新当前槽的名称 / base_url / wire_api / `experimental_bearer_token`，保留槽内其它字段与其它 Provider 块；**不改** auth.json；官方模式只切活动 Provider |
+| Codex | 更新当前槽的名称 / base_url / wire_api（completions=`chat`，responses=`responses`）/ `experimental_bearer_token`，保留槽内其它字段与其它 Provider 块；**不改** auth.json；anthropic Provider 不支持；官方模式只切活动 Provider |
 | OpenCode | **catalog(opencode)** 控制 ModelHub 受管块；未受管 Provider 保留。匹配块保留原 `options`、headers 和模型扩展字段，ModelHub 仅覆盖 `npm` / 名称 / baseURL / 同步模型 ID·名称 / `_modelhub`；Key 统一写 `auth.json` 并移除可能优先使用的旧 `options.apiKey`；`mcp`/`plugin` 等其它顶层键不动 |
 | Pi | **catalog(pi)** 控制 ModelHub 受管块；未受管 Provider 保留。匹配块保留 headers、compat、模型 reasoning/上下文等扩展字段，ModelHub 仅覆盖 baseUrl / api / apiKey / authHeader / 同步模型 ID·名称 / `_modelhub`；新 Provider 或原块缺少 UA 时补 `User-Agent: pi-coding-agent`，已有 UA 保留；settings 其它键不动 |
 
@@ -398,10 +398,10 @@ ModelHub 库（持久）
 | protocol | 主要消费者 |
 |----------|------------|
 | `anthropic-messages` | Claude；部分 OC/Pi |
-| `openai-completions` | OpenCode、Pi、多数中转 |
-| `openai-responses` | Codex（强相关） |
+| `openai-completions` | OpenCode、Pi、多数中转；Codex 写为 `wire_api="chat"` |
+| `openai-responses` | Codex（写为 `wire_api="responses"`） |
 
-分配给 Codex 且非 responses 时 UI 警告。
+Codex 支持 OpenAI 两种协议并按协议写出对应 `wire_api`；`anthropic-messages` 不可分配给 Codex，Preview 明确标出不支持并由 Apply 阻断。
 
 ---
 
@@ -423,7 +423,7 @@ ModelHub 库（持久）
 | 连通性详细日志 / test session | **否**（内存） |
 | agentBindings 草稿（模式 + 默认模型） | **否**（内存 + Apply 请求） |
 
-用户密钥与 Agent 配置在 **家目录**，不在应用仓库内。
+用户密钥与 Agent 配置在 **家目录**，不在应用仓库内。应用进程内所有读取/修改/写出命令按一次完整操作串行执行，避免并发测试摘要、Catalog 或 CRUD 以旧快照覆盖彼此；网络等待在读取所需快照后释放持久化锁。
 
 ---
 
@@ -548,6 +548,10 @@ src-tauri/src/
 | 33 | **移除 Provider 启用开关与 `set_provider_enabled` 命令**：同步范围完全由各 Agent 同步目录决定；`Provider.enabled` 字段仅保留供旧库迁移种子 |
 | 34 | **只管理 UI 字段**：Apply 在 Agent 磁盘原配置上按字段合并；Codex/OC/Pi 保留未知原生字段与未受管 Provider，OC/Pi 仅清理 `_modelhub.managed` 且退出同步目录的块 |
 | 35 | **全局快速添加**：Base URL 填写后可临时取模型；保存 Provider+模型后仅向勾选的 OC/Pi 加目录，并将共同默认模型立即应用到勾选 Agent；逐 Agent 部分失败不回滚已保存库项 |
+| 36 | 同一应用进程内的 Store/Secrets/config/Agent 文件命令按完整操作串行；网络等待不占持久化锁 |
+| 37 | OpenCode/Pi 多文件 Apply 先全量校验与序列化，再成组替换；中途失败回滚本轮已替换文件 |
+| 38 | 连通性自定义头按 HTTP 大小写不敏感语义覆盖鉴权/协议默认头；敏感请求头和响应头统一脱敏 |
+| 39 | Codex `wire_api` 按 Provider 协议映射：completions=`chat`、responses=`responses`；anthropic 明确不支持 |
 
 ---
 
@@ -619,3 +623,4 @@ src-tauri/src/
 | 2026-07-30 | 代码审查修复（详见对应章节）：①`read_live_bindings` 按 Agent 独立读取，单文件损坏不再清空全部草稿；②写出 key 避让磁盘上未受管原生 key，不再接管同名原生块、取消同步不再删原生块；③回匹配按协议两段式（精确协议优先、`/v1` 归一兑底、纯 base 兜底），排序不影响结果；④导入去重键 `provider_endpoint_key` 对 openai 系协议去掉末尾 `/v1`，与写出 `/v1` 地址视为同一端点，修复重复导入；⑤OpenCode `.jsonc` 解析容忍完整 JSONC（行内/块注释、尾逗号）；⑥默认模型下拉与 Apply 均限定在该 Provider 的同步模型子集内；⑦删除模型时 scrub 两个 catalog 的 `modelIds`，显式子集清空则整条移出目录（不退化为“全部”）；⑧单模型测试停止后面板回显上一次已完成结果，不把取消的跑记为失败；⑨Apply 完成后刷新全局 `paths.*Exists`，立即显示已找到。 |
 | 2026-07-31 | 新增全局「快速添加」：填写 Base URL 后可用未落库连接信息获取模型，亦可手动添加；选择模型、共同默认模型与目标 Agent 后，一次保存 Provider/模型/所选 OC·Pi 目录并立即逐 Agent Apply；仅勾选的 OC/Pi 加入目录，部分 Apply 失败不回滚已保存库项并逐项展示结果。 |
 | 2026-07-31 | 「快速添加」目标 Agent 勾选默认记忆上次选择（localStorage 持久化），再次打开弹窗时预勾上次勾选项；非法值会被过滤。 |
+| 2026-08-04 | 代码审查修复：命令级持久化串行避免并发旧快照覆盖；Provider 克隆改为 Provider/Secret/模型/Catalog 单次联合提交；OpenCode/Pi 多文件 Apply 先全量校验并在写失败时回滚；请求头改为大小写不敏感覆盖且补强敏感响应头脱敏；单测停止精确恢复运行前摘要、hydrate 保留尚待落盘的新结果；Preview 只接收最新响应；Codex completions/responses 分别写 chat/responses，anthropic 明确阻断；恢复 fmt/clippy 全量门禁。 |

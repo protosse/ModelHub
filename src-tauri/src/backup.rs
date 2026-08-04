@@ -284,10 +284,8 @@ pub fn restore_snapshot(
     let safety_stamp = new_stamp();
     let mut safety_wrote = false;
     for (_, dest, _) in &plan {
-        if dest.exists() {
-            if backup_file(paths, agent, dest, keep, &safety_stamp)?.is_some() {
-                safety_wrote = true;
-            }
+        if dest.exists() && backup_file(paths, agent, dest, keep, &safety_stamp)?.is_some() {
+            safety_wrote = true;
         }
     }
     let safety_stamp_out = if safety_wrote {
@@ -416,8 +414,11 @@ mod tests {
     }
 
     fn make_tmp(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("modelhub-backup-test-{}-{}", label, Uuidish::new()));
+        let dir = std::env::temp_dir().join(format!(
+            "modelhub-backup-test-{}-{}",
+            label,
+            Uuidish::suffix()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -426,7 +427,7 @@ mod tests {
     // Tiny unique suffix without pulling uuid into tests.
     struct Uuidish;
     impl Uuidish {
-        fn new() -> u128 {
+        fn suffix() -> u128 {
             use std::time::{SystemTime, UNIX_EPOCH};
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
